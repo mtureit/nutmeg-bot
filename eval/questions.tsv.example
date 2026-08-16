@@ -1,0 +1,14 @@
+# しきい値校正用の質問セット（PLAN.md §11 Phase 6）
+# このファイルを eval/questions.tsv にコピーして実際の FAQ を書く。
+# questions.tsv は実 FAQ を含むため .gitignore 済み（public リポジトリ対策）。
+#
+# 形式: label<TAB>question
+#   in  = Notion に答えがある質問。実 FAQ を 10〜20 問
+#   out = Notion に答えが無い質問。5〜10 問。無関係な話題を混ぜる
+#
+# 画像を答えとする質問も 2〜3 問混ぜて、キャプション由来チャンクが
+# ヒットするか確認すること。
+in	来場者数の実績はどのくらいですか
+in	会場のレイアウトはどうなっていますか
+out	今日の東京の天気は
+out	Python でファイルを読む方法を教えて
