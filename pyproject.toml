@@ -1,0 +1,23 @@
+[project]
+name = "nutmeg-bot"
+version = "0.1.0"
+description = "Notion の知識を RAG で検索し Slack で答える NUTMEG ナレッジ Bot"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "notion-client>=2.2.1",
+    "openai>=1.60.0",
+    "chromadb>=0.5.0",
+    "slack-bolt>=1.21.0",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.27.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
