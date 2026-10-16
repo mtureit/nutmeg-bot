@@ -122,10 +122,14 @@ def _render_block(
         lines.append(f"{pad}> {_plain(block, btype)}")
 
     elif btype == "callout":
-        icon = block.get("callout", {}).get("icon") or {}
-        emoji = icon.get("emoji", "") if icon.get("type") == "emoji" else ""
-        prefix = f"{emoji} " if emoji else ""
-        lines.append(f"{pad}> {prefix}{_plain(block, btype)}")
+        # Dashboard pages use empty callouts as frames around headings and
+        # databases; a bare ">" line would only add noise to the chunk.
+        text = _plain(block, btype)
+        if text:
+            icon = block.get("callout", {}).get("icon") or {}
+            emoji = icon.get("emoji", "") if icon.get("type") == "emoji" else ""
+            prefix = f"{emoji} " if emoji else ""
+            lines.append(f"{pad}> {prefix}{text}")
 
     elif btype == "code":
         language = block.get("code", {}).get("language", "")
@@ -146,6 +150,11 @@ def _render_block(
     elif btype == "child_page":
         title = block.get("child_page", {}).get("title", "")
         lines.append(f"{pad}- [{title}]({block_deep_link(block['id'], block['id'])})")
+
+    elif btype == "child_database":
+        # Rows are ingested as pages of their own; here we only note the database.
+        title = block.get("child_database", {}).get("title", "")
+        lines.append(f"{pad}- データベース: {title}")
 
     elif btype == "image":
         lines.extend(_render_image(block, page_id=page_id, caption_for=caption_for, pad=pad))
@@ -212,17 +221,90 @@ def blocks_to_markdown_lines(
     return lines
 
 
+def _date_to_text(date: dict | None) -> str:
+    if not date or not date.get("start"):
+        return ""
+    start = date["start"]
+    end = date.get("end")
+    return f"{start} 〜 {end}" if end else start
+
+
+def property_value_to_text(prop: dict) -> str:
+    """Render one database property value as plain text ("" when empty).
+
+    Relations and rollups are skipped: they carry page ids, not readable text.
+    Title is skipped too, since it already becomes the page heading.
+    """
+    ptype = prop.get("type", "")
+    value = prop.get(ptype)
+
+    if ptype == "rich_text":
+        return rich_text_to_md(value or [])
+    if ptype == "number":
+        return "" if value is None else str(value)
+    if ptype in ("select", "status"):
+        return (value or {}).get("name", "")
+    if ptype == "multi_select":
+        return ", ".join(option.get("name", "") for option in value or [])
+    if ptype == "date":
+        return _date_to_text(value)
+    if ptype == "checkbox":
+        return "はい" if value else ""
+    if ptype in ("url", "email", "phone_number"):
+        return value or ""
+    if ptype == "people":
+        return ", ".join(person.get("name", "") for person in value or [] if person.get("name"))
+    if ptype == "files":
+        return ", ".join(item.get("name", "") for item in value or [] if item.get("name"))
+    if ptype == "formula":
+        inner = value or {}
+        kind = inner.get("type", "")
+        if kind == "date":
+            return _date_to_text(inner.get("date"))
+        if kind == "boolean":
+            return "はい" if inner.get("boolean") else ""
+        result = inner.get(kind)
+        return "" if result is None else str(result)
+    return ""
+
+
+def properties_to_markdown_lines(properties: dict) -> list[str]:
+    """Render a database row's properties as "- name: value" lines.
+
+    Empty values are left out so a sparsely filled row does not turn into a
+    list of bare labels.
+    """
+    lines: list[str] = []
+    for name, prop in (properties or {}).items():
+        if prop.get("type") == "title":
+            continue
+        text = property_value_to_text(prop)
+        if text:
+            label = name or "（無名の項目）"
+            lines.append(f"- {label}: {text}")
+    return lines
+
+
 def blocks_to_markdown(
     blocks: Iterable[dict],
     *,
     page_id: str,
     title: str = "",
     caption_for: CaptionFn | None = None,
+    properties: dict | None = None,
 ) -> str:
-    """Convert a page's blocks into a Markdown document."""
+    """Convert a page's blocks into a Markdown document.
+
+    For a database row, pass its properties: they are placed right under the
+    title, so they land in the same chunk as the page name.
+    """
     lines: list[str] = []
     if title:
         lines.append(f"# {title}")
+        lines.append("")
+    prop_lines = properties_to_markdown_lines(properties) if properties else []
+    if prop_lines:
+        lines.extend(prop_lines)
         lines.append("")
     lines.extend(
         blocks_to_markdown_lines(blocks, page_id=page_id, caption_for=caption_for)

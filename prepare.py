@@ -43,7 +43,8 @@ def _throttle() -> None:
 def _page_title(page: dict) -> str:
     for prop in page.get("properties", {}).values():
         if prop.get("type") == "title":
-            return "".join(part.get("plain_text", "") for part in prop.get("title", []))
+            title = "".join(part.get("plain_text", "") for part in prop.get("title", []))
+            return title.strip() or "（無題）"
     return "（無題）"
 
 
@@ -72,51 +73,147 @@ def fetch_block_children(block_id: str, *, recursive: bool = True) -> list[dict]
     return blocks
 
 
+def fetch_database_rows(database_id: str) -> tuple[str, list[dict]]:
+    """Return a database's title and every row (as page objects).
+
+    Since Notion API 2025-09-03 a database holds one or more data sources, and
+    rows are queried per data source rather than per database.
+    """
+    notion = _get_notion()
+    database = notion.databases.retrieve(database_id=database_id)
+    _throttle()
+    title = "".join(part.get("plain_text", "") for part in database.get("title", []))
+
+    rows: list[dict] = []
+    for source in database.get("data_sources", []):
+        cursor: str | None = None
+        while True:
+            kwargs = {"data_source_id": source["id"], "page_size": 100}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            response = notion.data_sources.query(**kwargs)
+            _throttle()
+            rows.extend(
+                item for item in response.get("results", []) if item.get("object") == "page"
+            )
+            if not response.get("has_more"):
+                break
+            cursor = response.get("next_cursor")
+    return title, rows
+
+
+def _find_nested(blocks: list[dict]) -> tuple[list[str], list[str]]:
+    """Collect child page and child database ids at any depth.
+
+    Dashboards put databases inside columns and callouts, so a top-level scan
+    alone misses most of them.
+    """
+    pages: list[str] = []
+    databases: list[str] = []
+    for block in blocks:
+        btype = block.get("type")
+        if btype == "child_page":
+            pages.append(block["id"])
+        elif btype == "child_database":
+            databases.append(block["id"])
+        if block.get("children"):
+            nested_pages, nested_dbs = _find_nested(block["children"])
+            pages.extend(nested_pages)
+            databases.extend(nested_dbs)
+    return pages, databases
+
+
 def discover_pages(root_ids: list[str], *, limit: int | None = None) -> list[dict]:
-    """Walk down from the root pages, collecting page metadata."""
+    """Walk down from the root pages, collecting pages and database rows.
+
+    A root id may point at a page or at a database. Each page's blocks are
+    fetched here once (to find nested pages and databases) and kept on the
+    record, so process_page does not fetch them again.
+    """
     notion = _get_notion()
     excluded = {config.normalize_id(pid) for pid in config.NOTION_EXCLUDE_PAGE_IDS}
     seen: set[str] = set()
     pages: list[dict] = []
-    queue = list(root_ids)
+    # Each item: ("id", page_or_database_id, None) or ("row", row_id, (row, db_title)).
+    queue: list[tuple[str, str, tuple[dict, str] | None]] = [
+        ("id", root_id, None) for root_id in root_ids
+    ]
+
+    def enqueue_rows(db_title: str, rows: list[dict]) -> None:
+        logger.info("database %s: %d rows", db_title, len(rows))
+        queue.extend(("row", row["id"], (row, db_title)) for row in rows)
+
+    def enqueue_database(database_id: str) -> None:
+        db_key = config.normalize_id(database_id)
+        if db_key in seen:
+            return
+        seen.add(db_key)
+        if db_key in excluded:
+            logger.info("excluded by config: %s", database_id)
+            return
+        try:
+            db_title, rows = fetch_database_rows(database_id)
+        except APIResponseError as exc:
+            # Linked views of databases outside the connected pages land here.
+            logger.error("データベースを取得できません (%s): %s", database_id, exc)
+            return
+        enqueue_rows(db_title, rows)
 
     while queue:
         if limit is not None and len(pages) >= limit:
             break
-        page_id = queue.pop(0)
-        key = config.normalize_id(page_id)
+        kind, item_id, payload = queue.pop(0)
+        key = config.normalize_id(item_id)
         if key in seen:
             continue
+
+        if kind == "row":
+            page, database_title = payload
+        else:
+            try:
+                page = notion.pages.retrieve(page_id=item_id)
+                _throttle()
+            except APIResponseError as page_exc:
+                # A root id may point at a database rather than a page.
+                try:
+                    db_title, rows = fetch_database_rows(item_id)
+                except APIResponseError:
+                    logger.error(
+                        "ページを取得できません (%s): %s / Notion 側で「接続を追加」をしたか確認してください",
+                        item_id,
+                        page_exc,
+                    )
+                    continue
+                seen.add(key)
+                if key in excluded:
+                    logger.info("excluded by config: %s", item_id)
+                    continue
+                enqueue_rows(db_title, rows)
+                continue
+            database_title = ""
+
         seen.add(key)
-
         if key in excluded:
-            logger.info("excluded by config: %s", page_id)
+            logger.info("excluded by config: %s", item_id)
             continue
 
-        try:
-            page = notion.pages.retrieve(page_id=page_id)
-            _throttle()
-        except APIResponseError as exc:
-            logger.error(
-                "ページを取得できません (%s): %s / Notion 側で「接続を追加」をしたか確認してください",
-                page_id,
-                exc,
-            )
-            continue
-
+        blocks = fetch_block_children(page["id"])
         pages.append(
             {
                 "id": page["id"],
                 "title": _page_title(page),
                 "url": page.get("url", ""),
                 "last_edited": page.get("last_edited_time", ""),
+                "database": database_title,
+                "properties": page.get("properties", {}) if database_title else {},
+                "blocks": blocks,
             }
         )
 
-        # Queue nested child pages.
-        for block in fetch_block_children(page["id"], recursive=False):
-            if block.get("type") == "child_page":
-                queue.append(block["id"])
+        nested_pages, nested_databases = _find_nested(blocks)
+        queue.extend(("id", page_id, None) for page_id in nested_pages)
+        for database_id in nested_databases:
+            enqueue_database(database_id)
 
     return pages
 
@@ -179,10 +276,16 @@ def _load_previous(page_id: str) -> list[dict]:
 
 def process_page(page: dict, *, skip_images: bool) -> list[dict]:
     """Fetch, convert, chunk and return records for one page."""
-    blocks = fetch_block_children(page["id"])
+    blocks = page.get("blocks")
+    if blocks is None:
+        blocks = fetch_block_children(page["id"])
     caption_for = _caption_factory(page["title"], blocks, skip_images=skip_images)
     markdown = notion_md.blocks_to_markdown(
-        blocks, page_id=page["id"], title=page["title"], caption_for=caption_for
+        blocks,
+        page_id=page["id"],
+        title=page["title"],
+        caption_for=caption_for,
+        properties=page.get("properties"),
     )
     chunks = chunking.chunk_markdown(markdown)
 
@@ -254,7 +357,8 @@ def main() -> int:
     if args.dry_run:
         # Eyeballing this list before indexing is the check in PLAN.md 17.8.
         for page in pages:
-            print(f"  {page['last_edited'][:10]}  {page['title']}  {page['url']}")
+            where = f"[{page['database']}] " if page.get("database") else ""
+            print(f"  {page['last_edited'][:10]}  {where}{page['title']}  {page['url']}")
         return 0
 
     total_chunks = 0

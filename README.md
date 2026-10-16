@@ -34,7 +34,8 @@ uv が Python 3.12 を自動で用意する（システム Python は変更さ�
 
 ### 2. 環境変数
 
-`.env` を作り、次の内容を埋める。**`.env` はコミットしない**（`.gitignore` 済み）。
+ひな形 `sample.env` をコピーして `.env` を作り、値を埋める（`cp sample.env .env && chmod 600 .env`）。
+内容は次のとおり。**`.env` はコミットしない**（`.gitignore` 済み）。
 各キーの取得手順は [PLAN.md §12](PLAN.md)。
 
 ```bash

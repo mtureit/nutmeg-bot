@@ -27,6 +27,13 @@ Notion のドメイン知識を RAG で検索し、Slack で質問に答える�
 - **アーキテクチャ**: 外部依存を薄い層に隔離。2 段階パイプライン（prepare → JSONL → index_build）
   - `embed(texts) -> vectors` の署名は変えない（上位は埋め込みがローカルか API かを知らない）
   - `prepare.py` は `openai` を直接 import しない（画像処理は `vision_client.py` 経由）
+- **Notion データベース対応**（2026-10-16 追加）: ページ内の `child_database` を**どの深さでも**探し
+  （列・コールアウトの中も）、各行をページとして取り込む。行のプロパティは `- 名前: 値` で本文の前に置く。
+  API 2025-09-03 のため行は `databases.retrieve` → `data_sources.query` で取る（`databases.query` は旧方式）。
+  ルート ID に DB の ID を直接書いてもよい。relation / rollup は ID しか持たないので出力しない。
+  リンクドビュー（`unsupported` ブロック）は API が中身を返さないため読めない。元の DB を接続すること
+  - 探索時にブロックを全階層取得し、レコードに保持して `process_page` で再利用する（二重取得しない）。
+    そのため未更新ページでも探索のブロック取得は毎回走る
 - **Notion 取得**: `.env` の `NOTION_ROOT_PAGE_IDS` 起点で再帰的にページを辿る（PLAN.md §10.0）。
   `/v1/search` は使わない — 「共有された全部」という暗黙スコープになり取り込み範囲が勝手に広がるため
   - ブロックは 100 件/リクエスト・`has_children` で再帰。300ページ規模で 5〜8分かかる
@@ -40,7 +47,12 @@ Notion のドメイン知識を RAG で検索し、Slack で質問に答える�
 - **設計判断の確認済み**: 埋め込み API=OpenAI、生成も同一プロバイダに統一、画像は VLM キャプション化
   の3点をユーザーが承認（2026-07-29）。同日、Notion 取得方式（ルート起点再帰）と §17 の新設も承認
 
-## 現在の状況（最終更新: 2026-07-29）
+## 現在の状況（最終更新: 2026-10-16）
+- **2026-10-16**: 個人 Notion（研究管理ページ、DB 4 つ・計 19 行）で初の実接続。`--no-images` で 20 ページ /
+  161 チャンクを索引化し、`retriever.py` で DB のプロパティ（締切・著者等）まで検索できることを確認。
+  `uv run pytest` は 35 件成功。**画像込みの取り込み・しきい値校正・Slack 接続は未実施**
+  - 気づき: しきい値 0.35 では無関係なチャンク（類似度 0.37 前後）も通る。校正（Phase 6）で上げる見込み
+
 - **Phase 1〜5 の実装完了**。全モジュールが鍵なしで import でき、`uv run pytest` は 26 件成功
 - git 初期化済み・remote 設定済み（<https://github.com/mtureit/nutmeg-bot>、**public**）。**未 push**
 - **未実行**: Notion / OpenAI / Slack への実接続。鍵が未発行のため
@@ -52,8 +64,8 @@ Notion のドメイン知識を RAG で検索し、Slack で質問に答える�
 
 - `PLAN.md` §5 から**逸脱1点**: Notion ブロック→Markdown 変換を `notion_md.py` に分離した。
   ネットワーク非依存にしてユニットテスト可能にするため。PLAN.md §5 も更新済み
-- **`.env.example` は未作成**。権限設定の deny ルールでブロックされたため、
-  テンプレートは README「2. 環境変数」に記載してある
+- **`.env` のひな形は `sample.env`**（2026-10-16 作成）。`.env.example` は権限設定の deny ルール
+  （`Read(**/.env.*)`）に掛かるため、この名前にしている
 
 ### 次にやること
 1. ユーザーが鍵を発行（Notion / OpenAI / Slack。手順は PLAN.md §12）し `.env` を作成

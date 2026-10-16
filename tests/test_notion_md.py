@@ -148,3 +148,67 @@ def test_unsupported_block_is_skipped():
 def test_block_deep_link_strips_dashes():
     link = notion_md.block_deep_link("aaaa-bbbb", "cccc-dddd")
     assert link == "https://www.notion.so/aaaabbbb#ccccdddd"
+
+
+def test_empty_callout_adds_no_line_but_keeps_children():
+    blocks = [
+        block(
+            "callout",
+            body={"rich_text": [], "icon": {"type": "emoji", "emoji": "📌"}},
+            children=[block("heading_3", id="h", body={"rich_text": [rt("論文管理")]})],
+        )
+    ]
+    md = notion_md.blocks_to_markdown(blocks, page_id=PAGE_ID)
+    assert ">" not in md
+    assert "### 論文管理" in md
+
+
+def test_child_database_is_noted():
+    blocks = [block("child_database", body={"title": "論文管理_DB"})]
+    md = notion_md.blocks_to_markdown(blocks, page_id=PAGE_ID)
+    assert "データベース: 論文管理_DB" in md
+
+
+def test_properties_render_under_title():
+    properties = {
+        "タイトル": {"type": "title", "title": [rt("ある論文")]},
+        "著者": {"type": "rich_text", "rich_text": [rt("山田")]},
+        "発行年": {"type": "number", "number": 2024},
+        "分野": {"type": "multi_select", "multi_select": [{"name": "NLP"}, {"name": "教育"}]},
+        "締切": {"type": "date", "date": {"start": "2026-11-01", "end": "2026-11-03"}},
+        "済み": {"type": "checkbox", "checkbox": True},
+        "doi": {"type": "url", "url": "https://doi.org/x"},
+    }
+    md = notion_md.blocks_to_markdown(
+        [block("paragraph", body={"rich_text": [rt("本文")]})],
+        page_id=PAGE_ID,
+        title="ある論文",
+        properties=properties,
+    )
+    lines = md.splitlines()
+    assert lines[0] == "# ある論文"
+    assert "- 著者: 山田" in lines
+    assert "- 発行年: 2024" in lines
+    assert "- 分野: NLP, 教育" in lines
+    assert "- 締切: 2026-11-01 〜 2026-11-03" in lines
+    assert "- 済み: はい" in lines
+    assert "- doi: https://doi.org/x" in lines
+    # Title property is the heading, not a list item; body follows the properties.
+    assert not any(line.startswith("- タイトル") for line in lines)
+    assert lines.index("本文") > lines.index("- 著者: 山田")
+
+
+def test_empty_and_unreadable_properties_are_skipped():
+    properties = {
+        "備考": {"type": "rich_text", "rich_text": []},
+        "発行年": {"type": "number", "number": None},
+        "未確認": {"type": "checkbox", "checkbox": False},
+        "関連": {"type": "relation", "relation": [{"id": "abc"}]},
+        "期間": {"type": "date", "date": None},
+    }
+    assert notion_md.properties_to_markdown_lines(properties) == []
+
+
+def test_formula_property():
+    prop = {"type": "formula", "formula": {"type": "string", "string": "計算結果"}}
+    assert notion_md.property_value_to_text(prop) == "計算結果"
