@@ -48,6 +48,11 @@ Notion のドメイン知識を RAG で検索し、Slack で質問に答える�
   の3点をユーザーが承認（2026-07-29）。同日、Notion 取得方式（ルート起点再帰）と §17 の新設も承認
 
 ## 現在の状況（最終更新: 2026-10-16）
+- **branch 構成**: `python-socket-mode` = Python 版（Socket Mode + Chroma）を凍結。
+  `cloudflare-worker` = Worker 版を開発中（回答側を `worker/` の TypeScript に、索引を Vectorize に移した。
+  取り込みは Python のまま `index_build.py --target vectorize`）。詳細は **worker/README.md**
+  - デプロイ先は **mtureit 個人アカウント**（`4a114bfd…`）。雲居アカウントには載せない。
+    Worker <https://nutmeg-bot.mtureit.workers.dev> は 2026-10-16 にデプロイ済みだが secret 未設定（全リクエスト 401）
 - **2026-10-16**: 個人 Notion（研究管理ページ、DB 4 つ・計 19 行）で初の実接続。`--no-images` で 20 ページ /
   161 チャンクを索引化し、`retriever.py` で DB のプロパティ（締切・著者等）まで検索できることを確認。
   `uv run pytest` は 35 件成功。**画像込みの取り込み・しきい値校正・Slack 接続は未実施**

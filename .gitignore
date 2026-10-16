@@ -20,3 +20,8 @@ __pycache__/
 
 # --- OS ---
 .DS_Store
+
+# --- Cloudflare Worker ---
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars

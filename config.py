@@ -73,6 +73,14 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
 
 
+# --- Cloudflare Vectorize (the index the Worker reads; see worker/README.md) ---
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")  # needs Vectorize: Edit
+VECTORIZE_INDEX = os.getenv("VECTORIZE_INDEX", "nutmeg-bot")
+VECTORIZE_MANIFEST_PATH = DATA_DIR / "vectorize_ids.json"  # ids uploaded last time
+VECTORIZE_TEXT_MAX_BYTES = 8000  # metadata limit is 10 KiB per vector; leave room for the rest
+
+
 def _split_ids(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 

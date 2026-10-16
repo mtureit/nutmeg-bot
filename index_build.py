@@ -13,9 +13,11 @@ import json
 import sys
 
 import chromadb
+import httpx
 
 import config
 import embedder
+import vectorize_client
 
 
 def _load_records() -> list[dict]:
@@ -71,17 +73,54 @@ def check_index_meta(*, reset: bool) -> bool:
     return True
 
 
+def build_vectorize(records: list[dict]) -> int:
+    """Embed every record and upsert into Cloudflare Vectorize, then drop stale ids.
+
+    Every run re-sends all vectors, so an embedding model change is applied in
+    full without a separate reset step.
+    """
+    vectorize_client.require_credentials()
+    previous = vectorize_client.load_manifest()
+    current = {record["id"] for record in records}
+
+    print(
+        f"{len(records)} チャンクを埋め込み、Vectorize '{config.VECTORIZE_INDEX}' に送ります"
+        f"（{config.EMBED_MODEL}）"
+    )
+    with httpx.Client(timeout=60) as client:
+        for start in range(0, len(records), config.EMBED_BATCH_SIZE):
+            batch = records[start : start + config.EMBED_BATCH_SIZE]
+            vectors = embedder.embed([record["text"] for record in batch])
+            vectorize_client.upsert(batch, vectors, client=client)
+            print(f"  {min(start + len(batch), len(records))}/{len(records)}")
+
+        stale = vectorize_client.stale_ids(previous, current)
+        if stale:
+            vectorize_client.delete_ids(stale, client=client)
+            print(f"  消えたチャンクを {len(stale)} 件削除しました")
+
+    vectorize_client.save_manifest(current)
+    print(
+        "完了: Vectorize への反映は非同期です。数十秒後から Worker の検索に効きます\n"
+        "確認: cd worker && bunx wrangler vectorize info " + config.VECTORIZE_INDEX
+    )
+    return 0
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="JSONL を埋め込み Chroma に upsert する")
+    parser = argparse.ArgumentParser(description="JSONL を埋め込み、索引に upsert する")
     parser.add_argument(
-        "--reset", action="store_true", help="コレクションを作り直して全再索引する"
+        "--reset", action="store_true", help="（chroma のみ）コレクションを作り直して全再索引する"
+    )
+    parser.add_argument(
+        "--target",
+        choices=("chroma", "vectorize"),
+        default="chroma",
+        help="書き込み先。chroma=ローカル（bot.py 用）、vectorize=Cloudflare（Worker 用）",
     )
     args = parser.parse_args()
 
     config.ensure_dirs()
-
-    if not check_index_meta(reset=args.reset):
-        return 1
 
     records = _load_records()
     if not records:
@@ -89,6 +128,12 @@ def main() -> int:
             "data/clean/*.jsonl がありません。先に uv run python prepare.py を実行してください",
             file=sys.stderr,
         )
+        return 1
+
+    if args.target == "vectorize":
+        return build_vectorize(records)
+
+    if not check_index_meta(reset=args.reset):
         return 1
 
     client = chromadb.PersistentClient(path=str(config.CHROMA_DIR))

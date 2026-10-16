@@ -1,0 +1,20 @@
+{
+  "name": "nutmeg-bot-worker",
+  "private": true,
+  "description": "NUTMEG Knowledge Bot (Cloudflare Workers): Slack mention -> Vectorize search -> OpenAI answer",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check:worker": "tsc --noEmit -p tsconfig.worker.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "hono": "^4.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260717.1",
+    "@types/bun": "^1.3.0",
+    "typescript": "^5",
+    "wrangler": "^4.151.0"
+  }
+}
