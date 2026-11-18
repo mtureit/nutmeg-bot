@@ -2,7 +2,15 @@
 // Failures throw: answering "not found" on an API error would claim the
 // knowledge base lacks an answer it may well have.
 
-import { EMBED_MODEL, EMBED_TIMEOUT_MS, GEN_MAX_TOKENS, GEN_MODEL, GEN_TEMPERATURE, GEN_TIMEOUT_MS } from "./config";
+import {
+  EMBED_DIMENSIONS,
+  EMBED_MODEL,
+  EMBED_TIMEOUT_MS,
+  GEN_MAX_TOKENS,
+  GEN_MODEL,
+  GEN_TEMPERATURE,
+  GEN_TIMEOUT_MS,
+} from "./config";
 
 const post = async (path: string, body: unknown, apiKey: string, timeoutMs: number) => {
   const res = await fetch(`https://api.openai.com/v1/${path}`, {
@@ -17,7 +25,12 @@ const post = async (path: string, body: unknown, apiKey: string, timeoutMs: numb
 };
 
 export const embedQuery = async (text: string, apiKey: string): Promise<number[]> => {
-  const data = await post("embeddings", { model: EMBED_MODEL, input: [text] }, apiKey, EMBED_TIMEOUT_MS);
+  const data = await post(
+    "embeddings",
+    { model: EMBED_MODEL, input: [text], dimensions: EMBED_DIMENSIONS },
+    apiKey,
+    EMBED_TIMEOUT_MS,
+  );
   const vector = data?.data?.[0]?.embedding;
   if (!Array.isArray(vector)) throw new Error("openai embeddings: no vector in response");
   return vector;

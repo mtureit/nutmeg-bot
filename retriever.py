@@ -17,8 +17,23 @@ import chromadb
 
 import config
 import embedder
+import index_build
 
 _collection = None
+
+
+def _check_index_meta() -> None:
+    meta = index_build._read_index_meta()
+    if meta is None:
+        return
+    if meta.get("embed_model") == config.EMBED_MODEL and meta.get("embed_dim") == config.EMBED_DIM:
+        return
+    raise RuntimeError(
+        "ローカル Chroma 索引の埋め込み設定が現在の config と異なります。"
+        f" 索引: {meta.get('embed_model')} / {meta.get('embed_dim')} 次元、"
+        f"現在: {config.EMBED_MODEL} / {config.EMBED_DIM} 次元。"
+        "uv run python index_build.py --reset を実行して全再索引してください。"
+    )
 
 
 def get_collection():
@@ -34,6 +49,7 @@ def get_collection():
 
 def search_all(question: str, k: int = config.TOP_K) -> list[dict]:
     """Return the top k hits with similarities, without applying the threshold."""
+    _check_index_meta()
     vector = embedder.embed_query(question)
     result = get_collection().query(query_embeddings=[vector], n_results=k)
 

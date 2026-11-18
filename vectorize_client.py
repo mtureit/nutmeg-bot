@@ -22,7 +22,7 @@ import httpx
 import config
 
 _API = "https://api.cloudflare.com/client/v4/accounts/{account}/vectorize/v2/indexes/{index}/{op}"
-_DELETE_BATCH = 1000
+_DELETE_BATCH = 100  # API rejects more than 100 ids per delete_by_ids call
 
 
 def _url(op: str) -> str:
@@ -110,10 +110,14 @@ def load_manifest() -> set[str]:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return set()
-    # A manifest written for another index says nothing about this one.
-    if manifest.get("index") != config.VECTORIZE_INDEX:
+    # A manifest written for another index, including the old untagged format,
+    # says nothing about this one and must never produce deletion candidates.
+    if not isinstance(manifest, dict) or manifest.get("index") != config.VECTORIZE_INDEX:
         return set()
-    return set(manifest.get("ids", []))
+    ids = manifest.get("ids", [])
+    if not isinstance(ids, list):
+        return set()
+    return {item for item in ids if isinstance(item, str)}
 
 
 def save_manifest(ids: set[str]) -> None:

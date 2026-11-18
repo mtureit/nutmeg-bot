@@ -4,6 +4,7 @@
 
 # --- Notion 本文の平文コピー・画像・キャプション（PLAN.md §17.5） ---
 data/
+data/cache/
 chroma_db/
 logs/
 

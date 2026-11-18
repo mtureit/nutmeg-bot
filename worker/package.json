@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "check:worker": "tsc --noEmit -p tsconfig.worker.json",
-    "test": "bun test"
+    "test": "bun test",
+    "ask": "bun --env-file=../.env scripts/ask.ts"
   },
   "dependencies": {
     "hono": "^4.4.0"

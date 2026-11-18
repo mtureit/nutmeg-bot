@@ -61,6 +61,17 @@ def test_manifest_round_trip_and_other_index_is_ignored(tmp_path, monkeypatch):
     assert vectorize_client.load_manifest() == set()
 
 
+def test_legacy_manifest_without_index_does_not_produce_stale_ids(tmp_path, monkeypatch):
+    path = tmp_path / "ids.json"
+    path.write_text(json.dumps({"ids": ["old-index-id"]}), encoding="utf-8")
+    monkeypatch.setattr(config, "VECTORIZE_MANIFEST_PATH", path)
+    monkeypatch.setattr(config, "VECTORIZE_INDEX", "nutmeg-bot-512")
+
+    previous = vectorize_client.load_manifest()
+    assert previous == set()
+    assert vectorize_client.stale_ids(previous, {"new-index-id"}) == []
+
+
 def test_upsert_and_delete_hit_the_right_endpoints(monkeypatch):
     monkeypatch.setattr(config, "CLOUDFLARE_ACCOUNT_ID", "acct")
     monkeypatch.setattr(config, "CLOUDFLARE_API_TOKEN", "token")
@@ -91,3 +102,11 @@ def test_api_error_is_raised_not_swallowed(monkeypatch):
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(RuntimeError, match="upsert"):
             vectorize_client.upsert([record(0)], [[0.5]], client=client)
+
+
+def test_embed_text_prefixes_title_and_heading_path():
+    import index_build
+
+    record = {"title": "クイズアプリデプロイに向けて", "heading_path": "とりま練習環境で", "text": "- CT の作成"}
+    assert index_build.embed_text(record) == "クイズアプリデプロイに向けて > とりま練習環境で\n\n- CT の作成"
+    assert index_build.embed_text({"title": "", "heading_path": "", "text": "x"}) == "x"

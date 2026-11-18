@@ -19,6 +19,7 @@ DATA_DIR = BASE_DIR / "data"
 CLEAN_DIR = DATA_DIR / "clean"
 IMAGES_DIR = DATA_DIR / "images"
 CAPTIONS_DIR = DATA_DIR / "captions"
+BLOCK_CACHE_DIR = DATA_DIR / "cache" / "blocks"
 CHROMA_DIR = BASE_DIR / "chroma_db"
 LOGS_DIR = BASE_DIR / "logs"
 INDEX_META_PATH = CHROMA_DIR / "index_meta.json"
@@ -27,10 +28,42 @@ INDEX_META_PATH = CHROMA_DIR / "index_meta.json"
 # No "query:"/"passage:" prefix needed. Pricing must be confirmed against the
 # official OpenAI pricing page before rollout.
 EMBED_MODEL = "text-embedding-3-small"
-EMBED_DIM = 1536  # reducible via the dimensions parameter; changing it forces a full re-index
+EMBED_DIM = 512  # must match worker/src/config.ts; changing it forces a full re-index
 EMBED_BATCH_SIZE = 100  # API limit is 2048 inputs per request / 8191 tokens per input
+FREE_TIER_STORED_DIMS = 5_000_000
+FREE_TIER_MAX_VECTORS = FREE_TIER_STORED_DIMS // EMBED_DIM
+# Keep about 3% headroom below FREE_TIER_MAX_VECTORS for the default selection.
+CHUNK_BUDGET = int(
+    os.getenv("CHUNK_BUDGET", str(FREE_TIER_MAX_VECTORS * 97 // 100))
+)
+
+# --- page selection ---
+# Personal records (1on1 notes, member profiles) are excluded for privacy.
+EXCLUDE_TITLE_KEYWORDS = ["よもやま", "雑談", "アイスブレイク", "1on1", "メンバーデータベース"]
+TIER1_KEYWORDS = [
+    "手順",
+    "マニュアル",
+    "引き継ぎ",
+    "引継ぎ",
+    "規約",
+    "ルール",
+    "仕様",
+    "設計",
+    "README",
+    "ガイド",
+    "how to",
+    "運用",
+    "環境構築",
+    "セットアップ",
+    "デプロイ",
+]
+TIER2_KEYWORDS = ["企画", "プロジェクト", "概要", "要件", "振り返り"]
+TIER4_KEYWORDS = ["MT", "mtg", "ミーティング", "定例", "議事録"]
 
 # --- chunking ---
+CHUNKER_VERSION = 2
+CHUNK_TARGET_CHARS = 1200
+CHUNK_MIN_CHARS = 300
 CHUNK_MAX_CHARS = 1500
 CHUNK_OVERLAP = 150
 
@@ -56,9 +89,17 @@ VISION_SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 # --- rate limiting ---
 NOTION_SLEEP_SEC = 0.35  # Notion allows roughly 3 requests/second on average
 API_MAX_RETRIES = 5  # 429 / 5xx are retried with exponential backoff
+NOTION_INITIAL_RETRY_DELAY_SEC = 1.0
+NOTION_MAX_RETRY_DELAY_SEC = 30.0
+MAX_CONSECUTIVE_NON_FITTING_PAGES = 200
 
 # --- ingest scope and access control (security boundary; PLAN.md 17) ---
-NOTION_EXCLUDE_PAGE_IDS: list[str] = []  # skipped even when under a root page
+# Skipped even when under a root page. Databases of personal profiles
+# (phone, birthday, email) are excluded for privacy.
+NOTION_EXCLUDE_PAGE_IDS: list[str] = [
+    "284783e8-ea0d-4059-b30a-c4493ac6efc2",  # Profile
+    "27941f19-2063-8039-acca-f5c5fbea70e1",  # メンバーデータベース
+]
 ALLOWED_SLACK_CHANNELS: list[str] = []  # empty list = every channel allowed
 ALLOW_GUEST_USERS = False  # refuse single-channel / multi-channel guests
 
@@ -76,8 +117,8 @@ SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
 # --- Cloudflare Vectorize (the index the Worker reads; see worker/README.md) ---
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")  # needs Vectorize: Edit
-VECTORIZE_INDEX = os.getenv("VECTORIZE_INDEX", "nutmeg-bot")
-VECTORIZE_MANIFEST_PATH = DATA_DIR / "vectorize_ids.json"  # ids uploaded last time
+VECTORIZE_INDEX = os.getenv("VECTORIZE_INDEX", "nutmeg-bot-512")
+VECTORIZE_MANIFEST_PATH = DATA_DIR / "vectorize_ids.json"  # ids plus the index name uploaded last time
 VECTORIZE_TEXT_MAX_BYTES = 8000  # metadata limit is 10 KiB per vector; leave room for the rest
 
 
@@ -105,5 +146,12 @@ def require(name: str) -> str:
 
 
 def ensure_dirs() -> None:
-    for directory in (CLEAN_DIR, IMAGES_DIR, CAPTIONS_DIR, CHROMA_DIR, LOGS_DIR):
+    for directory in (
+        CLEAN_DIR,
+        IMAGES_DIR,
+        CAPTIONS_DIR,
+        BLOCK_CACHE_DIR,
+        CHROMA_DIR,
+        LOGS_DIR,
+    ):
         directory.mkdir(parents=True, exist_ok=True)

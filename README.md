@@ -16,7 +16,7 @@ Slack @mention → bot.py → retriever.py → llm_client.py → 出典付き返
 
 | 種別 | 使うもの |
 |---|---|
-| 埋め込み | OpenAI `text-embedding-3-small`（1536次元） |
+| 埋め込み | OpenAI `text-embedding-3-small`（512次元） |
 | 回答生成 | OpenAI `gpt-4.1-mini`（temperature=0.2） |
 | 画像キャプション | OpenAI `gpt-4.1-mini`（vision, detail=high） |
 | ベクトル DB | Chroma（`space=cosine`） |
@@ -79,6 +79,35 @@ uv run python prepare.py --limit 5
 uv run python prepare.py
 ```
 
+### 3.5 Vectorize の無料枠とページ選定
+
+Cloudflare Vectorize の無料枠は保存次元数 5,000,000 です。512 次元のチャンクを
+9,765 件まで保存できますが、`prepare.py` は約 3% の余裕を残して既定の
+`CHUNK_BUDGET=9500` を使います。`--budget N` または環境変数 `CHUNK_BUDGET` で変更でき、
+`--budget 0` は無制限です。
+
+ページは `config.py` のキーワードリストで優先順位を決めます。手順・規約・設計などは
+Tier 1、企画・要件などは Tier 2、その他は Tier 3、議事録・定例・日付タイトルなどは
+Tier 4 です。ページタイトルと親データベース名を判定し、よもやま・雑談・アイスブレイクは
+常に除外します。除外・キーワードは `config.py` で編集できます。
+Tier 判定は Phase A のメタデータだけで行い、本文ブロックは Phase B で優先順位と予算に応じて遅延取得します。
+
+実行時に `data/selected.json` が選ばれたページ ID とチャンク数を記録します。
+`index_build.py --target vectorize` はこの一覧にない JSONL を読み込まず、前回の索引に
+だけ残ったチャンクを削除します。また、無料枠を超える件数は埋め込み前に停止します。
+
+Notion 読み出しは、`NOTION_ROOT_PAGE_IDS` が空なら Phase A で `/v1/search` と接続済みデータベースの行から
+メタデータだけを集め、Tier と更新時刻の順に Phase B で必要なページのブロックを遅延取得します。予算が埋まると
+未選択ページを取得しません。`--dry-run` はブロックを取得せず Tier 集計とデータベース別の行数だけを表示します。
+ルート ID モードでは従来どおりネストしたページ・インライン DB を探索します。429/5xx・接続エラーを再試行し、
+失敗ページは `selected.json` に記録して前回のベクトルを保持します。再帰ブロックは `data/cache/blocks/` に
+キャッシュされ、必要なら `--no-block-cache` で無効化できます。
+
+チャンクは見出しごとの小さなセクションを `CHUNK_TARGET_CHARS=1200` まで連結し、
+`CHUNK_MAX_CHARS=1500` を超える長いセクションだけをオーバーラップ分割します。タイトル・プロパティも
+最初の本文と結合されます。JSONL には `chunker_version` が入り、バージョン変更時は本文ブロックのキャッシュを
+再利用して再チャンクします。
+
 ### 4. 索引化と検索
 
 ```bash
@@ -113,6 +142,9 @@ uv run pytest          # chunking の決定性・Notion 変換・ACL のテス�
 
 `chunking.py` は決定的でなければならない。壊れると「週次 cron のたびに全件が再埋め込みされる」
 という気づきにくい形で表面化するため、テストで固定している。
+
+Worker 版はしきい値を通ったヒットの前後チャンクも同じページから取得し、ページ単位に連結してから
+回答モデルへ渡す（最大約 12,000 文字）。
 
 ## 運用
 

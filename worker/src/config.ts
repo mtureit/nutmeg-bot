@@ -2,6 +2,8 @@
 // the embedding model in particular MUST match the one used to build the index.
 
 export const EMBED_MODEL = "text-embedding-3-small";
+// MUST equal Python config.EMBED_DIM.
+export const EMBED_DIMENSIONS = 512;
 export const GEN_MODEL = "gpt-4.1-mini";
 export const GEN_TEMPERATURE = 0.2;
 export const GEN_MAX_TOKENS = 1024;
@@ -10,6 +12,7 @@ export const TOP_K = 5;
 // Vectorize returns a cosine *similarity* (higher = closer), unlike Chroma's distance.
 // Provisional; calibrate with eval_threshold.py (PLAN.md 11).
 export const SIM_THRESHOLD = 0.35;
+export const MAX_CONTEXT_CHARS = 12_000;
 
 // waitUntil() keeps running for about 30 s after the response, so the two
 // OpenAI calls together must finish well inside that.

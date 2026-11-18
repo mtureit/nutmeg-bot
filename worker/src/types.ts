@@ -12,6 +12,7 @@ export type Env = {
 };
 
 export type Context = {
+  id?: string;
   text: string;
   metadata: Record<string, unknown>;
   similarity: number;

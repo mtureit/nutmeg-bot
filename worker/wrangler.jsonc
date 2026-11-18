@@ -14,8 +14,8 @@
 	"account_id": "4a114bfdd139e285794ff69108c5c5f9",
 
 	// Python 側（index_build.py --target vectorize）が書き込む索引。
-	// 2026-10-16 作成: 1536 次元（text-embedding-3-small）、cosine
-	"vectorize": [{ "binding": "VECTORIZE", "index_name": "nutmeg-bot" }],
+	// 2026-10-16 作成: 512 次元（text-embedding-3-small, dimensions=512）、cosine
+	"vectorize": [{ "binding": "VECTORIZE", "index_name": "nutmeg-bot-512" }],
 
 	// Slack の再送を弾く重複排除。キーは ev:<event_id>（5分）。2026-10-16 作成
 	"kv_namespaces": [{ "binding": "DEDUP", "id": "076d1f28da284e08b2778aeb09de50a7" }],

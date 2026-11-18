@@ -5,12 +5,12 @@ Slack のメンションに、Notion の内容から答える Bot の **回答�
 
 ```
 【取り込み】Python（手元の Mac。のちに GitHub Actions で週1回）
-  Notion ─▶ prepare.py ─▶ index_build.py --target vectorize ──▶ Vectorize "nutmeg-bot"
+  Notion ─▶ prepare.py ─▶ index_build.py --target vectorize ──▶ Vectorize "nutmeg-bot-512"
 
 【回答】この Worker（https://nutmeg-bot.mtureit.workers.dev）
   Slack @メンション ─POST /slack/events─▶ ① 署名検証 ② 重複排除(KV) ③ 即 200
-     waitUntil の中で: ゲスト判定 → 質問を埋め込み → Vectorize 検索 → しきい値判定
-                       → OpenAI で回答 → スレッドに返信（出典つき）
+     waitUntil の中で: ゲスト判定 → 質問を埋め込み → Vectorize 検索・前後チャンク展開
+                       → ページ単位に連結（最大約12,000文字）→ OpenAI で回答 → スレッドに返信（出典つき）
 ```
 
 Python 版（Socket Mode + Chroma）は branch `python-socket-mode` に凍結してある。
@@ -21,7 +21,7 @@ Python 版（Socket Mode + Chroma）は branch `python-socket-mode` に凍結し
 |---|---|
 | Cloudflare アカウント | **Mtureit@gmail.com's Account**（`4a114bfdd139e285794ff69108c5c5f9`）。`wrangler.jsonc` の `account_id` で固定 |
 | Worker | `nutmeg-bot` → <https://nutmeg-bot.mtureit.workers.dev> |
-| Vectorize | `nutmeg-bot`（1536 次元 / cosine） |
+| Vectorize | `nutmeg-bot-512`（512 次元 / cosine）。既存の `nutmeg-bot` は変更しない |
 | KV | `nutmeg-bot-dedup`（`076d1f28…`）。Slack の再送を弾く |
 
 ## 鍵
@@ -48,11 +48,15 @@ bunx wrangler secret put SLACK_SIGNING_SECRET
 ### 1. 索引を Vectorize に入れる
 
 ```sh
+cd worker
+bunx wrangler vectorize create nutmeg-bot-512 --dimensions=512 --metric=cosine
+cd ..
 uv run python prepare.py --no-images          # まだなら
 uv run python index_build.py --target vectorize
 ```
 
-前回送った ID を `data/vectorize_ids.json` に残し、消えたチャンクは Vectorize からも削除する。
+前回送った ID を `data/vectorize_ids.json` に index 名付きで残し、別 index の manifest や旧形式の
+manifest は削除候補に使わない。消えたチャンクは同じ index からも削除する。
 Vectorize への反映は非同期で、数十秒かかる。
 
 ### 2. Slack アプリ（HTTP 方式）
@@ -104,8 +108,11 @@ bunx wrangler tail     # 本番ログ（質問文は出さない）
 ## 制限と注意
 
 - `waitUntil` は応答後 約30秒で打ち切られる。OpenAI の呼び出しは埋め込み 8 秒・生成 18 秒で打ち切る
-- 回答1回あたりの外部リクエストは 4 回（users.info / 埋め込み / 生成 / chat.postMessage）。無料プランの上限 50 に収まる
+- 回答1回あたりの外部リクエストは最大 6 回（users.info / 埋め込み / Vectorize query / getByIds / 生成 / chat.postMessage）。無料プランの上限 50 に収まる
 - **Notion の本文が Cloudflare 上に置かれる**（Vectorize のメタデータとして。上限 10KiB/件、本文は 8000 バイトで切る）。
   ローカル完結だった Python 版からの変化なので、PLAN.md §17.7 の外部送信範囲に含めて考える
 - 埋め込みモデルは Python（`config.py`）と Worker（`src/config.ts`）で**必ず同じにする**。変えたら全件再送
 - `SIM_THRESHOLD` は Python 版と同じ暫定 0.35。Vectorize の cosine の score は類似度（大きいほど近い）
+- Python の JSONL は `chunker_version` を持つ。チャンク設定を更新したときは、`prepare.py` がブロックキャッシュを
+  再利用して再チャンクする。Worker はしきい値を通ったヒットの前後チャンクを `getByIds` で取得し、ページごとに
+  重複除去・文書順で連結してから回答する。
