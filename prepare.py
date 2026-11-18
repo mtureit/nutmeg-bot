@@ -15,6 +15,7 @@ databases and their rows).
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 import inspect
 import json
@@ -134,6 +135,53 @@ def _page_title(page: dict) -> str:
     return "（無題）"
 
 
+_TAG_PROPERTY_NAMES = {"tag", "tags"}
+
+
+def _is_tag_property(name: str) -> bool:
+    return name.casefold() in _TAG_PROPERTY_NAMES
+
+
+def _relation_target_references(prop: dict) -> tuple[set[str], set[str]]:
+    """Find target data-source/database ids in a relation schema or value."""
+    data_source_ids: set[str] = set()
+    database_ids: set[str] = set()
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "data_source_id" and isinstance(item, str):
+                    data_source_ids.add(item)
+                elif key == "database_id" and isinstance(item, str):
+                    database_ids.add(item)
+                elif key != "id":
+                    walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(prop)
+    return data_source_ids, database_ids
+
+
+def _relation_ids(prop: dict) -> list[str]:
+    value = prop.get("relation")
+    if isinstance(value, dict):
+        value = value.get("results") or value.get("relation") or []
+    if not isinstance(value, list):
+        return []
+    ids: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        nested = item.get("relation")
+        if isinstance(nested, dict) and nested.get("id"):
+            ids.append(nested["id"])
+        elif item.get("id"):
+            ids.append(item["id"])
+    return ids
+
+
 def fetch_block_children(block_id: str, *, recursive: bool = True) -> list[dict]:
     """Fetch every child block, following pagination and nesting."""
     notion = _get_notion()
@@ -163,7 +211,14 @@ def fetch_block_children(block_id: str, *, recursive: bool = True) -> list[dict]
     return blocks
 
 
-def fetch_database_rows(database_id: str, *, database: dict | None = None) -> tuple[str, list[dict]]:
+def fetch_database_rows(
+    database_id: str,
+    *,
+    database: dict | None = None,
+    query_cache: dict[str, list[dict]] | None = None,
+    source_ids: dict[str, str] | None = None,
+    excluded_data_source_ids: set[str] | None = None,
+) -> tuple[str, list[dict]]:
     """Return a database's title and every row (as page objects).
 
     Since Notion API 2025-09-03 a database holds one or more data sources, and
@@ -180,8 +235,26 @@ def fetch_database_rows(database_id: str, *, database: dict | None = None) -> tu
     title = "".join(part.get("plain_text", "") for part in database.get("title", []))
 
     rows: list[dict] = []
+    excluded_keys = {
+        config.normalize_id(source_id) for source_id in (excluded_data_source_ids or set())
+    }
     for source in database.get("data_sources", []):
-        rows.extend(_query_data_source(source["id"]))
+        source_id = source["id"]
+        if config.normalize_id(source_id) in excluded_keys:
+            logger.info("excluded data source by config: %s", source_id)
+            continue
+        source_key = config.normalize_id(source_id)
+        if query_cache is not None and source_key in query_cache:
+            source_rows = query_cache[source_key]
+        else:
+            source_rows = _query_data_source(source_id)
+            if query_cache is not None:
+                query_cache[source_key] = source_rows
+        rows.extend(source_rows)
+        if source_ids is not None:
+            for row in source_rows:
+                if row.get("id"):
+                    source_ids[config.normalize_id(row["id"])] = source_id
     return title, rows
 
 
@@ -206,6 +279,207 @@ def _query_data_source(data_source_id: str) -> list[dict]:
     return rows
 
 
+def _load_data_source_schema(
+    notion,
+    ancestors: _NotionAncestorResolver,
+    data_source_id: str,
+    cache: dict[str, dict],
+) -> dict:
+    key = config.normalize_id(data_source_id)
+    if key in cache:
+        return cache[key]
+
+    existing = ancestors.objects.get(("data_source", key))
+    if existing and isinstance(existing.get("properties"), dict):
+        cache[key] = existing
+        return existing
+
+    retrieve = getattr(getattr(notion, "data_sources", None), "retrieve", None)
+    if retrieve is not None:
+        try:
+            schema = _notion_call(
+                "data_sources.retrieve",
+                lambda: retrieve(data_source_id=data_source_id),
+                sdk_retries=_uses_sdk_retries(notion),
+            )
+            _throttle()
+            if isinstance(schema, dict):
+                cache[key] = schema
+                ancestors.objects[("data_source", key)] = schema
+                return schema
+        except _NOTION_READ_ERRORS as exc:
+            logger.info("タグ relation のスキーマを取得できません (%s): %s", data_source_id, exc)
+
+    schema = existing or {}
+    cache[key] = schema
+    return schema
+
+
+def _relation_data_source_ids(
+    prop: dict,
+    *,
+    ancestors: _NotionAncestorResolver,
+) -> set[str]:
+    data_source_ids, database_ids = _relation_target_references(prop)
+    for database_id in database_ids:
+        try:
+            database = ancestors.load("database", database_id)
+        except _NOTION_READ_ERRORS:
+            continue
+        for source in (database or {}).get("data_sources", []):
+            if source.get("id"):
+                data_source_ids.add(source["id"])
+    return data_source_ids
+
+
+def _schema_property(properties: object, name: str) -> dict | None:
+    if not isinstance(properties, dict):
+        return None
+    folded = name.casefold()
+    for property_name, prop in properties.items():
+        if isinstance(property_name, str) and property_name.casefold() == folded:
+            return prop if isinstance(prop, dict) else None
+    return None
+
+
+def _all_relation_ids(
+    notion,
+    page_id: str,
+    property_name: str,
+    prop: dict,
+) -> list[str]:
+    """Return inline relation ids and the pages.properties.retrieve remainder."""
+    ids = _relation_ids(prop)
+    if not prop.get("has_more"):
+        return ids
+
+    properties = getattr(getattr(notion, "pages", None), "properties", None)
+    retrieve = getattr(properties, "retrieve", None)
+    if retrieve is None:
+        return ids
+
+    cursor = prop.get("next_cursor")
+    while True:
+        kwargs = {
+            "page_id": page_id,
+            "property_id": prop.get("id") or property_name,
+            "page_size": 100,
+        }
+        if cursor:
+            kwargs["start_cursor"] = cursor
+        response = _notion_call(
+            "pages.properties.retrieve",
+            lambda: retrieve(**kwargs),
+            sdk_retries=_uses_sdk_retries(notion),
+        )
+        _throttle()
+        if isinstance(response, dict):
+            results = response.get("results")
+            if results is None:
+                results = response.get("relation", [])
+            if results is None or results == []:
+                property_item = response.get("property_item")
+                if isinstance(property_item, dict):
+                    results = [property_item]
+            if isinstance(results, list):
+                ids.extend(_relation_ids({"relation": results}))
+            if not response.get("has_more"):
+                break
+            cursor = response.get("next_cursor")
+            if not cursor:
+                break
+        else:
+            break
+    return ids
+
+
+def _resolve_tags(
+    pages: list[dict],
+    *,
+    notion,
+    ancestors: _NotionAncestorResolver,
+    source_ids: dict[str, str],
+    query_cache: dict[str, list[dict]],
+    excluded_data_source_ids: set[str],
+) -> None:
+    """Resolve Tag/Tags relations for Phase A candidates in one pass."""
+    schema_cache: dict[str, dict] = {}
+    relation_entries: list[tuple[dict, str, dict, set[str]]] = []
+    target_ids: set[str] = set()
+    seen_tags_by_page: dict[str, set[str]] = {}
+
+    for page in pages:
+        page["tags"] = []
+        page_id = page.get("id", "")
+        seen_tags_by_page[config.normalize_id(page_id)] = set()
+        source_id = source_ids.get(config.normalize_id(page_id), "")
+        parent = page.get("parent", {})
+        if not source_id and parent.get("type") == "data_source_id":
+            source_id = parent.get("data_source_id", "")
+
+        for property_name, prop in (page.get("properties") or {}).items():
+            if not _is_tag_property(property_name) or not isinstance(prop, dict):
+                continue
+            relation_targets = _relation_data_source_ids(prop, ancestors=ancestors)
+            if not relation_targets and source_id:
+                schema = _load_data_source_schema(
+                    notion, ancestors, source_id, schema_cache
+                )
+                schema_prop = _schema_property(schema.get("properties"), property_name)
+                if schema_prop is not None:
+                    relation_targets = _relation_data_source_ids(
+                        schema_prop, ancestors=ancestors
+                    )
+            relation_targets = {
+                target_id
+                for target_id in relation_targets
+                if config.normalize_id(target_id) not in excluded_data_source_ids
+            }
+            relation_entries.append((page, property_name, prop, relation_targets))
+            target_ids.update(relation_targets)
+
+    names_by_source: dict[str, dict[str, str]] = {}
+    for data_source_id in target_ids:
+        source_key = config.normalize_id(data_source_id)
+        if source_key in excluded_data_source_ids:
+            continue
+        if source_key in query_cache:
+            rows = query_cache[source_key]
+        else:
+            try:
+                rows = _query_data_source(data_source_id)
+            except _NOTION_READ_ERRORS as exc:
+                logger.info("タグデータソースを取得できません (%s): %s", data_source_id, exc)
+                rows = []
+            query_cache[source_key] = rows
+        names_by_source[source_key] = {
+            config.normalize_id(row["id"]): _page_title(row)
+            for row in rows
+            if row.get("object") == "page" and row.get("id")
+        }
+
+    for page, property_name, prop, relation_targets in relation_entries:
+        page_tags: list[str] = page["tags"]
+        seen = seen_tags_by_page[config.normalize_id(page["id"])]
+        relation_ids = _all_relation_ids(notion, page["id"], property_name, prop)
+        target_keys = [config.normalize_id(target_id) for target_id in relation_targets]
+        for relation_id in relation_ids:
+            relation_key = config.normalize_id(relation_id)
+            tag_name = ""
+            for source_key in target_keys:
+                tag_name = names_by_source.get(source_key, {}).get(relation_key, "")
+                if tag_name:
+                    break
+            if not tag_name and not target_keys:
+                for source_names in names_by_source.values():
+                    tag_name = source_names.get(relation_key, "")
+                    if tag_name:
+                        break
+            if tag_name and tag_name.casefold() not in seen:
+                page_tags.append(tag_name)
+                seen.add(tag_name.casefold())
+
+
 def search_shared() -> tuple[list[dict], list[str]]:
     """Everything connected to the integration: (page objects, database ids).
 
@@ -215,6 +489,7 @@ def search_shared() -> tuple[list[dict], list[str]]:
     notion = _get_notion()
     pages: list[dict] = []
     database_ids: list[str] = []
+    search_shared.last_excluded_data_source_ids = set()
     cursor: str | None = None
     while True:
         kwargs = {"page_size": 100}
@@ -230,6 +505,13 @@ def search_shared() -> tuple[list[dict], list[str]]:
             if item.get("object") == "page":
                 pages.append(item)
             elif item.get("object") == "data_source":
+                if config.normalize_id(item["id"]) in {
+                    config.normalize_id(page_id)
+                    for page_id in config.NOTION_EXCLUDE_PAGE_IDS
+                }:
+                    search_shared.last_excluded_data_source_ids.add(
+                        config.normalize_id(item["id"])
+                    )
                 parent = item.get("parent", {})
                 database_ids.append(parent.get("database_id") or item["id"])
             elif item.get("object") == "database":
@@ -375,6 +657,19 @@ class _NotionAncestorResolver:
             key = (current_type, config.normalize_id(current_id))
             if key[1] in self.excluded:
                 return True
+            if current_obj is not None:
+                parent = current_obj.get("parent", {})
+                if parent.get("type") == "data_source_id":
+                    parent_ids = (
+                        parent.get("data_source_id"),
+                        parent.get("database_id"),
+                    )
+                    if any(
+                        parent_id
+                        and config.normalize_id(parent_id) in self.excluded
+                        for parent_id in parent_ids
+                    ):
+                        return True
             if key in visited:
                 return False
             visited.add(key)
@@ -512,6 +807,9 @@ def discover_pages(
     notion = _get_notion()
     excluded = {config.normalize_id(pid) for pid in config.NOTION_EXCLUDE_PAGE_IDS}
     ancestors = _NotionAncestorResolver(notion, excluded)
+    excluded_data_source_ids = set(excluded)
+    data_source_rows_cache: dict[str, list[dict]] = {}
+    page_source_ids: dict[str, str] = {}
     seen: set[str] = set()
     pages: list[dict] = []
     root_keys = {config.normalize_id(root_id) for root_id in root_ids}
@@ -565,7 +863,13 @@ def discover_pages(
             if ancestors.is_excluded("database", database_id, database):
                 logger.info("excluded by config: %s", database_id)
                 return True
-            db_title, rows = fetch_database_rows(database_id, database=database)
+            db_title, rows = fetch_database_rows(
+                database_id,
+                database=database,
+                query_cache=data_source_rows_cache,
+                source_ids=page_source_ids,
+                excluded_data_source_ids=excluded_data_source_ids,
+            )
         except _NOTION_READ_ERRORS as exc:
             # Linked views of databases outside the connected pages land here.
             failed_database_keys.add(db_key)
@@ -585,6 +889,9 @@ def discover_pages(
         if ancestors.is_excluded("page", page_id, page):
             logger.info("excluded by config: %s", page_id)
             return False
+        parent = page.get("parent", {})
+        if parent.get("type") == "data_source_id" and parent.get("data_source_id"):
+            page_source_ids[config.normalize_id(page_id)] = parent["data_source_id"]
         pages.append(
             {
                 "id": page_id,
@@ -607,6 +914,9 @@ def discover_pages(
 
     def discover_from_search() -> list[dict]:
         search_results, shared_databases = search_shared()
+        excluded_data_source_ids.update(
+            getattr(search_shared, "last_excluded_data_source_ids", set())
+        )
         root_keys.update(config.normalize_id(page["id"]) for page in search_results)
         root_keys.update(config.normalize_id(database_id) for database_id in shared_databases)
         logger.info(
@@ -646,6 +956,14 @@ def discover_pages(
                 continue
             page_seen.add(key)
             append_metadata(page, ancestors.database_title(page))
+        _resolve_tags(
+            pages,
+            notion=notion,
+            ancestors=ancestors,
+            source_ids=page_source_ids,
+            query_cache=data_source_rows_cache,
+            excluded_data_source_ids=excluded_data_source_ids,
+        )
         return pages
 
     if root_ids:
@@ -725,6 +1043,9 @@ def discover_pages(
             "blocks": blocks,
         }
         pages.append(record)
+        parent = page.get("parent", {})
+        if parent.get("type") == "data_source_id" and parent.get("data_source_id"):
+            page_source_ids[config.normalize_id(page["id"])] = parent["data_source_id"]
         discover_pages.last_discovered_page_count += 1
 
         if fetch_blocks:
@@ -733,6 +1054,14 @@ def discover_pages(
             for database_id in nested_databases:
                 enqueue_database(database_id)
 
+    _resolve_tags(
+        pages,
+        notion=notion,
+        ancestors=ancestors,
+        source_ids=page_source_ids,
+        query_cache=data_source_rows_cache,
+        excluded_data_source_ids=excluded_data_source_ids,
+    )
     return pages
 
 
@@ -796,6 +1125,36 @@ def _cache_path(page_id: str) -> Path:
     return config.CLEAN_DIR / f"{config.normalize_id(page_id)}.jsonl"
 
 
+def _tags_metadata(tags: object, *, max_chars: int = config.TAG_METADATA_MAX_CHARS) -> str:
+    if not isinstance(tags, list):
+        return ""
+    parts: list[str] = []
+    length = 0
+    for tag in tags:
+        if not isinstance(tag, str) or not tag:
+            continue
+        separator = ", " if parts else ""
+        if length + len(separator) + len(tag) > max_chars:
+            break
+        parts.append(tag)
+        length += len(separator) + len(tag)
+    return ", ".join(parts)
+
+
+def _add_chunk_header(text: str, title: str, tags: list[str]) -> str:
+    """Add a compact retrieval header without repeating an existing title line."""
+    tag_text = _tags_metadata(tags)
+    title_line = f"# {title}"
+    if text.startswith(title_line):
+        if not tag_text or f"タグ: {tag_text}" in text[: len(title_line) + len(tag_text) + 20]:
+            return text
+        return f"{title_line}\n\nタグ: {tag_text}{text[len(title_line):]}"
+    header = f"[{title}]"
+    if tag_text:
+        header += f" タグ: {tag_text}"
+    return f"{header}\n\n{text}"
+
+
 def process_page(page: dict, *, skip_images: bool) -> list[dict]:
     """Fetch, convert, chunk and return records for one page."""
     blocks = page.get("blocks")
@@ -811,24 +1170,34 @@ def process_page(page: dict, *, skip_images: bool) -> list[dict]:
         title=title,
         caption_for=caption_for,
         properties=page.get("properties"),
+        tags=page.get("tags", []),
     )
     markdown, body_redacted = redact.redact(markdown)
     redacted = title_redacted + body_redacted
     if redacted:
         logger.info("認証情報を伏字にしました: %d 箇所 (%s)", redacted, title)
     chunks = chunking.chunk_markdown(markdown)
+    tags = page.get("tags", [])
+    if not isinstance(tags, list):
+        tags = []
+    tags_text = _tags_metadata(tags)
 
     records = []
     for seq, chunk in enumerate(chunks):
+        chunk_text = (
+            _add_chunk_header(chunk["text"], title, tags)
+            if "tags" in page
+            else chunk["text"]
+        )
         image_links = [
             line.split("画像リンク:", 1)[1].strip()
-            for line in chunk["text"].splitlines()
+            for line in chunk_text.splitlines()
             if "画像リンク:" in line
         ]
         records.append(
             {
                 "id": f"{page['id']}-{seq}",
-                "text": chunk["text"],
+                "text": chunk_text,
                 "title": title,
                 "url": page["url"],
                 "last_edited": page["last_edited"],
@@ -836,6 +1205,7 @@ def process_page(page: dict, *, skip_images: bool) -> list[dict]:
                 "has_image": bool(image_links),
                 "image_links": ",".join(image_links),
                 "heading_path": " > ".join(chunk["heading_path"]),
+                "tags": tags_text,
                 "chunker_version": config.CHUNKER_VERSION,
             }
         )
@@ -919,6 +1289,18 @@ def _print_dry_run(pages: list[dict], ordered: list[dict]) -> None:
     for tier in (1, 2, 3, 4):
         print(f"Tier {tier}: {tier_counts[tier]} ページ")
     print(f"キーワード除外: {excluded} ページ")
+
+    tag_counts: Counter[str] = Counter()
+    for page in ordered:
+        if page.get("tier") is None:
+            continue
+        tags = page.get("tags", [])
+        if isinstance(tags, list):
+            tag_counts.update(tag for tag in tags if isinstance(tag, str) and tag)
+    if tag_counts:
+        print("タグ（選択対象候補の上位20）:")
+        for tag, count in tag_counts.most_common(20):
+            print(f"  {tag}: {count} ページ")
 
     database_counts: dict[str, int] = {}
     for page in pages:

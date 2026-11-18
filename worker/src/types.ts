@@ -5,6 +5,7 @@ export type Env = {
   SLACK_BOT_TOKEN: string;
   SLACK_SIGNING_SECRET: string;
   OPENAI_API_KEY: string;
+  NOTION_TOKEN?: string;
   // Optional vars (wrangler.jsonc "vars"). Comma-separated channel ids; empty = every channel.
   ALLOWED_SLACK_CHANNELS?: string;
   // "true" lets single/multi-channel guests ask. Anything else refuses them.

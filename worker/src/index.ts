@@ -6,10 +6,21 @@
 // must not happen before the response.
 
 import { Hono } from "hono";
-import { DEDUP_EVENT_TTL_SEC, EMPTY_QUESTION_MESSAGE, ERROR_MESSAGE, NOT_FOUND_MESSAGE } from "./config";
+import {
+  DEDUP_EVENT_TTL_SEC,
+  EMPTY_QUESTION_MESSAGE,
+  ERROR_MESSAGE,
+  GEN_TIMEOUT_MS,
+  LIVE_FALLBACK_MIN_REMAINING_MS,
+  NOT_FOUND_MESSAGE,
+  REQUEST_DEADLINE_MS,
+  RELATED_TIMEOUT_MS,
+  SLACK_RESPONSE_RESERVE_MS,
+} from "./config";
 import { chat } from "./openai";
+import { handleCommand, liveFallback, relatedPages } from "./notion";
 import { buildPrompt, buildSources, SYSTEM_PROMPT } from "./prompt";
-import { search } from "./retriever";
+import { createDeadline, search, usableRemaining, type RequestDeadline } from "./retriever";
 import { isAllowedChannel, isAllowedUser, postMessage, stripMentions, verifySlackSignature } from "./slack";
 import type { Env } from "./types";
 
@@ -25,19 +36,40 @@ const seen = async (kv: KVNamespace, key: string, ttl: number): Promise<boolean>
   }
 };
 
-export const answer = async (env: Env, question: string): Promise<{ text: string; found: boolean }> => {
-  const contexts = await search(env, question);
-  if (!contexts) return { text: NOT_FOUND_MESSAGE, found: false };
-  const reply = await chat(SYSTEM_PROMPT, buildPrompt(question, contexts), env.OPENAI_API_KEY);
+export const answer = async (
+  env: Env,
+  question: string,
+  deadline: RequestDeadline = createDeadline(REQUEST_DEADLINE_MS),
+): Promise<{ text: string; found: boolean }> => {
+  const contexts = await search(env, question, deadline);
+  if (!contexts) {
+    if (deadline.remaining() < LIVE_FALLBACK_MIN_REMAINING_MS) return { text: NOT_FOUND_MESSAGE, found: false };
+    const liveContexts = await liveFallback(env, question, deadline);
+    if (!liveContexts.length) return { text: NOT_FOUND_MESSAGE, found: false };
+    const timeout = Math.min(GEN_TIMEOUT_MS, usableRemaining(deadline));
+    if (timeout <= 0) return { text: NOT_FOUND_MESSAGE, found: false };
+    const reply = await chat(SYSTEM_PROMPT, buildPrompt(question, liveContexts), env.OPENAI_API_KEY, timeout);
+    if (!reply || reply.includes(NOT_FOUND_MESSAGE)) return { text: NOT_FOUND_MESSAGE, found: false };
+    return { text: reply + buildSources(liveContexts), found: true };
+  }
+  const timeout = Math.min(GEN_TIMEOUT_MS, usableRemaining(deadline));
+  if (timeout <= 0) throw new Error("request deadline exceeded before answer");
+  const relatedDeadline = createDeadline(Math.min(RELATED_TIMEOUT_MS, Math.max(0, deadline.remaining() - SLACK_RESPONSE_RESERVE_MS)));
+  const [reply, related] = await Promise.all([
+    chat(SYSTEM_PROMPT, buildPrompt(question, contexts), env.OPENAI_API_KEY, timeout),
+    relatedPages(env, contexts, relatedDeadline).catch(() => ""),
+  ]);
   // No sources on a "not found" reply.
   if (!reply || reply.includes(NOT_FOUND_MESSAGE)) return { text: NOT_FOUND_MESSAGE, found: false };
-  return { text: reply + buildSources(contexts), found: true };
+  const suffix = [buildSources(contexts), related ? `\n${related}` : ""].join("");
+  return { text: reply + suffix, found: true };
 };
 
 export const handleMention = async (env: Env, event: any): Promise<void> => {
   const channel = String(event.channel ?? "");
   const user = String(event.user ?? "");
   const threadTs = String(event.thread_ts ?? event.ts ?? "");
+  const deadline = createDeadline(REQUEST_DEADLINE_MS);
 
   if (!isAllowedChannel(channel, env.ALLOWED_SLACK_CHANNELS)) {
     console.log("channel not allowed:", channel);
@@ -54,7 +86,12 @@ export const handleMention = async (env: Env, event: any): Promise<void> => {
       await postMessage(channel, EMPTY_QUESTION_MESSAGE, threadTs, env.SLACK_BOT_TOKEN);
       return;
     }
-    const { text, found } = await answer(env, question);
+    const commandReply = await handleCommand(env, question, deadline);
+    if (commandReply !== null) {
+      await postMessage(channel, commandReply, threadTs, env.SLACK_BOT_TOKEN);
+      return;
+    }
+    const { text, found } = await answer(env, question, deadline);
     // Identifiers and outcome only; the question text is not logged (PLAN.md 17.6).
     console.log(`answered user=${user} channel=${channel} found=${found}`);
     await postMessage(channel, text, threadTs, env.SLACK_BOT_TOKEN);

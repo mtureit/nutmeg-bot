@@ -31,6 +31,7 @@ Python 版（Socket Mode + Chroma）は branch `python-socket-mode` に凍結し
 | `OPENAI_API_KEY` | Worker の secret と `.env` | 質問の埋め込み・回答（Worker）／チャンクの埋め込み（Python） |
 | `SLACK_BOT_TOKEN`（`xoxb-`） | Worker の secret | 返信・ゲスト判定 |
 | `SLACK_SIGNING_SECRET` | Worker の secret | Slack からのリクエストの署名検証 |
+| `NOTION_TOKEN` | Worker の secret（任意） | 索引外 fallback、タグ/最近コマンド、関連ページ |
 | `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` | `.env` | Python から Vectorize に書き込む。トークンの権限は **Account › Vectorize › Edit** だけ |
 | `NOTION_TOKEN` | `.env` | Notion の取り込み |
 
@@ -41,7 +42,28 @@ cd worker
 bunx wrangler secret put OPENAI_API_KEY
 bunx wrangler secret put SLACK_BOT_TOKEN
 bunx wrangler secret put SLACK_SIGNING_SECRET
+# Notion integration は対象ページだけの read-only 権限にする
+pbpaste | bunx wrangler secret put NOTION_TOKEN
 ```
+
+`NOTION_TOKEN` が未設定でも、既存の Vectorize 索引を使う通常質問は動作する。Notion のライブ fallback とコマンドは利用不可になる。
+
+## Notion コマンドと索引外 fallback
+
+メンション後の質問が次のコマンドに一致する場合、LLM を呼ばずに Notion API から一覧を返す。
+
+```text
+タグ一覧       # 記事数の多い順に最大30タグ
+タグ <name>    # そのタグの新しい記事を最大10件
+最近           # 最終編集が新しい記事を最大10件
+ヘルプ / help
+```
+
+タグの件数とタグ一覧は KV の `cache:tagcounts` / `cache:taglib` に24時間保存する。KV が空で時間が足りない場合は、タグ名だけを返して件数が unavailable であることを示す。個人ページなどの除外 ID は、一覧・fallback・関連ページのすべてで適用する。
+
+Vectorize にしきい値以上の文脈がない場合、`NOTION_TOKEN` があれば質問からタイトル検索語を作り、Notion の検索結果を祖先ページまで確認して最大2ページを直接取得する。本文は対応するブロックだけを Markdown 化し、伏字化してから各ページ6,000文字に切る。出典には `（索引外・Notion から直接取得）` を付ける。
+
+索引から回答できた場合は、引用ページの中で記事数が最も少ないタグを使い、関連ページを最大3件付ける。ライブ fallback と Not Found の回答には関連ページを付けない。
 
 ## セットアップ
 
@@ -107,7 +129,7 @@ bunx wrangler tail     # 本番ログ（質問文は出さない）
 
 ## 制限と注意
 
-- `waitUntil` は応答後 約30秒で打ち切られる。OpenAI の呼び出しは埋め込み 8 秒・生成 18 秒で打ち切る
+- `waitUntil` は応答後 約30秒で打ち切られる。処理全体はイベント開始から約27秒を期限とし、Slack 返信用の予約時間を残す。残り12秒未満ならライブ fallback を省略する。OpenAI の呼び出しは埋め込み8秒・生成18秒を上限に、最終回答には残り時間を渡す
 - 回答1回あたりの外部リクエストは最大 6 回（users.info / 埋め込み / Vectorize query / getByIds / 生成 / chat.postMessage）。無料プランの上限 50 に収まる
 - **Notion の本文が Cloudflare 上に置かれる**（Vectorize のメタデータとして。上限 10KiB/件、本文は 8000 バイトで切る）。
   ローカル完結だった Python 版からの変化なので、PLAN.md §17.7 の外部送信範囲に含めて考える

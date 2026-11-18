@@ -1,0 +1,110 @@
+[
+  {
+    "name": "authorization headers",
+    "input": "Authorization: Bearer dummy-pass-123\nAuthorization: Basic ZHVtbXktcGFzcy0xMjM=",
+    "expected": "Authorization: Bearer [伏字]\nAuthorization: Basic [伏字]",
+    "count": 2
+  },
+  {
+    "name": "curl secret headers",
+    "input": "curl -H \"X-Something-Token: dummy-pass-123\" -H 'X-Client-Secret: dummy-secret-456'",
+    "expected": "curl -H \"X-Something-Token: [伏字]\" -H 'X-Client-Secret: [伏字]'",
+    "count": 2
+  },
+  {
+    "name": "non secret header",
+    "input": "curl -H \"X-Request-Id: dummy-request-123\"",
+    "expected": "curl -H \"X-Request-Id: dummy-request-123\"",
+    "count": 0
+  },
+  {
+    "name": "long random values under secret names",
+    "input": "# ADMIN_TOKEN 0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd\nCLIENT_SECRET=Abc123_-Abc123_-Abc123_-Abc123_-Abc123_-Abc123_-",
+    "expected": "# ADMIN_TOKEN [伏字]\nCLIENT_SECRET=[伏字]",
+    "count": 2
+  },
+  {
+    "name": "prefixed token",
+    "input": "secret_access_key: dummy-value-1\nsecret_a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "expected": "secret_access_key: [伏字]\n[伏字]",
+    "count": 2
+  },
+  {
+    "name": "table secret",
+    "input": "| DB_PASSWORD | 0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd |",
+    "expected": "| DB_PASSWORD | [伏字] |",
+    "count": 1
+  },
+  {
+    "name": "ordinary long identifier",
+    "input": "通常の識別子: 0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd",
+    "expected": "通常の識別子: 0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd",
+    "count": 0
+  },
+  {
+    "name": "notion urls",
+    "input": "NOTION_TOKEN=https://www.notion.so/Title-3c641f19206380b38c93e0d81c3b014e\nSECRET_KEY=https://app.notion.com/p/3c641f19206380b38c93e0d81c3b014e",
+    "expected": "NOTION_TOKEN=https://www.notion.so/Title-3c641f19206380b38c93e0d81c3b014e\nSECRET_KEY=https://app.notion.com/p/3c641f19206380b38c93e0d81c3b014e",
+    "count": 0
+  },
+  {
+    "name": "quoted secret keys",
+    "input": "{\"password\":\"dummy-pass-123\", \"token\": \"dummy-token-456\", \"api_key\": \"dummy-key-789\"}",
+    "expected": "{\"password\":\"[伏字]\", \"token\": \"[伏字]\", \"api_key\": \"[伏字]\"}",
+    "count": 3
+  },
+  {
+    "name": "quoted values with spaces",
+    "input": "password = \"hello world\"\nDB_PASSWORD=\"my pass word\"\n'api_key': 'a b c'",
+    "expected": "password = \"[伏字]\"\nDB_PASSWORD=\"[伏字]\"\n'api_key': '[伏字]'",
+    "count": 3
+  },
+  {
+    "name": "placeholders",
+    "input": "{\"password\": \"<生成した値>\"}\n{\"password\": \"<既存値>\"}\n{\"password\": \"${VAR}\"}\n{\"password\": \"$VAR\"}\n{\"password\": \"xxx\"}\n{\"password\": \"...\"}",
+    "expected": "{\"password\": \"<生成した値>\"}\n{\"password\": \"<既存値>\"}\n{\"password\": \"${VAR}\"}\n{\"password\": \"$VAR\"}\n{\"password\": \"xxx\"}\n{\"password\": \"...\"}",
+    "count": 0
+  },
+  {
+    "name": "password labels",
+    "input": "pass: xxxxx\nパスワード：xxxx\nPW dummy-pass-123",
+    "expected": "pass: [伏字]\nパスワード：[伏字]\nPW [伏字]",
+    "count": 3
+  },
+  {
+    "name": "ordinary password prose",
+    "input": "パスは /opt/app\ncompass value\nパスワードを設定したら、いったん抜ける\nパスワードリセット\nメールアドレスとパスワード入力すると\nplease pass this",
+    "expected": "パスは /opt/app\ncompass value\nパスワードを設定したら、いったん抜ける\nパスワードリセット\nメールアドレスとパスワード入力すると\nplease pass this",
+    "count": 0
+  },
+  {
+    "name": "glued environment names",
+    "input": "PGPASSWORD='dummyPw1' psql -h db.example.com -U app -d appdb -f dump.sql\nMYSQL_PWD=dummyMysql1\nDBPASSWORD=dummyDb1\nAPITOKEN=dummyApi1\nCLIENTSECRET=dummyClient1",
+    "expected": "PGPASSWORD='[伏字]' psql -h db.example.com -U app -d appdb -f dump.sql\nMYSQL_PWD=[伏字]\nDBPASSWORD=[伏字]\nAPITOKEN=[伏字]\nCLIENTSECRET=[伏字]",
+    "count": 5
+  },
+  {
+    "name": "ordinary glued words",
+    "input": "PGPASS=dummyPass1\nbypass dummyPass2\ncompass dummyPass3\ntokenization dummyPass4",
+    "expected": "PGPASS=dummyPass1\nbypass dummyPass2\ncompass dummyPass3\ntokenization dummyPass4",
+    "count": 0
+  },
+  {
+    "name": "Japanese label particles",
+    "input": "無線の場合，基本的にネットワーク名はexample-ssid，パスワードはdummy123\nパスワードが dummy123 です\nパスワード dummy123\nパスワードはdummy123で\nパスワードの欄に dummy123 と入力してログインを押下\nログインは学籍番号s000000・パスワードdummy1でOK\n暗証番号はdummyPin1\nネットワークキーがdummyKey1\nPW dummyPw2\npass: dummyPass2",
+    "expected": "無線の場合，基本的にネットワーク名はexample-ssid，パスワードは[伏字]\nパスワードが [伏字] です\nパスワード [伏字]\nパスワードは[伏字]で\nパスワードの欄に [伏字] と入力してログインを押下\nログインは学籍番号s000000・パスワード[伏字]でOK\n暗証番号は[伏字]\nネットワークキーが[伏字]\nPW [伏字]\npass: [伏字]",
+    "count": 10
+  },
+  {
+    "name": "prose placeholders and no value phrases",
+    "input": "パスワードはLogin\nパスワードはrequired\nパスワードはsha256\nパスワードは${PASSWORD}\nパスワードは[伏字]\nパスワードはhttps://www.notion.so/example-page\nパスワード再設定\nパスワードリセット\nパスワード変更\nパスワードを設定\nユーザ名:パスワード@ホスト",
+    "expected": "パスワードはLogin\nパスワードはrequired\nパスワードはsha256\nパスワードは${PASSWORD}\nパスワードは[伏字]\nパスワードはhttps://www.notion.so/example-page\nパスワード再設定\nパスワードリセット\nパスワード変更\nパスワードを設定\nユーザ名:パスワード@ホスト",
+    "count": 0
+  },
+  {
+    "name": "paths",
+    "input": "インストールパス：/opt/app/bin\nパス: /usr/local/bin\npass: /srv/app\ntoken: ~/token-file\npassword: /srv/password-file\nパスワード：/srv/password-file\npw ~/password-file",
+    "expected": "インストールパス：/opt/app/bin\nパス: /usr/local/bin\npass: /srv/app\ntoken: ~/token-file\npassword: [伏字]\nパスワード：[伏字]\npw [伏字]",
+    "count": 3
+  }
+]

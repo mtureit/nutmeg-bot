@@ -34,6 +34,7 @@ export const buildPrompt = (question: string, contexts: Context[]): string => {
 export const buildSources = (contexts: Context[]): string => {
   const pages: Array<[string, string]> = [];
   const images: string[] = [];
+  let hasLiveSource = false;
   for (const ctx of contexts) {
     const title = titleOf(ctx);
     const url = String(ctx.metadata.url ?? "");
@@ -44,6 +45,7 @@ export const buildSources = (contexts: Context[]): string => {
         if (link && !images.includes(link)) images.push(link);
       }
     }
+    if (ctx.metadata.source === "live") hasLiveSource = true;
   }
   const lines: string[] = [];
   if (pages.length) {
@@ -54,5 +56,6 @@ export const buildSources = (contexts: Context[]): string => {
     lines.push("関連図:");
     for (const link of images) lines.push(`• <${link}>`);
   }
+  if (hasLiveSource) lines.push("（索引外・Notion から直接取得）");
   return lines.join("\n");
 };

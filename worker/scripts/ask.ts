@@ -8,6 +8,7 @@
 //   cd worker && bun run ask --hits "質問"   # also list the top hits and scores
 
 import { answer } from "../src/index";
+import { parseCommand } from "../src/notion";
 import { searchAll } from "../src/retriever";
 import { SIM_THRESHOLD } from "../src/config";
 import type { Env } from "../src/types";
@@ -59,16 +60,21 @@ if (!question) {
   process.exit(1);
 }
 
+const command = parseCommand(question);
+const needsVectorize = command.kind === "question";
 const env = {
-  OPENAI_API_KEY: need("OPENAI_API_KEY"),
-  VECTORIZE: restVectorize(
-    need("CLOUDFLARE_ACCOUNT_ID"),
-    need("CLOUDFLARE_API_TOKEN"),
-    process.env.VECTORIZE_INDEX || "nutmeg-bot-512",
-  ),
+  OPENAI_API_KEY: needsVectorize ? need("OPENAI_API_KEY") : process.env.OPENAI_API_KEY || "",
+  NOTION_TOKEN: process.env.NOTION_TOKEN,
+  VECTORIZE: needsVectorize
+    ? restVectorize(
+        need("CLOUDFLARE_ACCOUNT_ID"),
+        need("CLOUDFLARE_API_TOKEN"),
+        process.env.VECTORIZE_INDEX || "nutmeg-bot-512",
+      )
+    : ({} as VectorizeIndex),
 } as unknown as Env;
 
-if (showHits) {
+if (showHits && needsVectorize) {
   const hits = await searchAll(env, question);
   console.log(`--- 検索結果（しきい値 ${SIM_THRESHOLD}）`);
   for (const hit of hits) {

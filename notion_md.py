@@ -229,15 +229,26 @@ def _date_to_text(date: dict | None) -> str:
     return f"{start} 〜 {end}" if end else start
 
 
-def property_value_to_text(prop: dict) -> str:
+def property_value_to_text(
+    prop: dict,
+    *,
+    property_name: str = "",
+    relation_names: list[str] | None = None,
+) -> str:
     """Render one database property value as plain text ("" when empty).
 
-    Relations and rollups are skipped: they carry page ids, not readable text.
-    Title is skipped too, since it already becomes the page heading.
+    Non-tag relations and rollups are skipped: they carry page ids, not readable
+    text. Tag relations use the names resolved by prepare.py.
+    Title is skipped by properties_to_markdown_lines, since it already becomes
+    the page heading.
     """
     ptype = prop.get("type", "")
     value = prop.get(ptype)
 
+    if ptype == "relation":
+        if property_name.casefold() in {"tag", "tags"}:
+            return ", ".join(relation_names or [])
+        return ""
     if ptype == "rich_text":
         return rich_text_to_md(value or [])
     if ptype == "number":
@@ -268,7 +279,11 @@ def property_value_to_text(prop: dict) -> str:
     return ""
 
 
-def properties_to_markdown_lines(properties: dict) -> list[str]:
+def properties_to_markdown_lines(
+    properties: dict,
+    *,
+    tags: list[str] | None = None,
+) -> list[str]:
     """Render a database row's properties as "- name: value" lines.
 
     Empty values are left out so a sparsely filled row does not turn into a
@@ -278,7 +293,11 @@ def properties_to_markdown_lines(properties: dict) -> list[str]:
     for name, prop in (properties or {}).items():
         if prop.get("type") == "title":
             continue
-        text = property_value_to_text(prop)
+        text = property_value_to_text(
+            prop,
+            property_name=name,
+            relation_names=tags,
+        )
         if text:
             label = name or "（無名の項目）"
             lines.append(f"- {label}: {text}")
@@ -292,6 +311,7 @@ def blocks_to_markdown(
     title: str = "",
     caption_for: CaptionFn | None = None,
     properties: dict | None = None,
+    tags: list[str] | None = None,
 ) -> str:
     """Convert a page's blocks into a Markdown document.
 
@@ -302,7 +322,7 @@ def blocks_to_markdown(
     if title:
         lines.append(f"# {title}")
         lines.append("")
-    prop_lines = properties_to_markdown_lines(properties) if properties else []
+    prop_lines = properties_to_markdown_lines(properties, tags=tags) if properties else []
     if prop_lines:
         lines.extend(prop_lines)
         lines.append("")

@@ -46,6 +46,18 @@ def _has_tier4_keyword(text: str) -> bool:
     return _contains_keyword(text, japanese_keywords)
 
 
+def _has_exact_tag(tags: object, candidates: list[str]) -> bool:
+    if not isinstance(tags, list):
+        return False
+    wanted = {candidate.casefold() for candidate in candidates}
+    return any(isinstance(tag, str) and tag.casefold() in wanted for tag in tags)
+
+
+def _has_tier1_database(database: str) -> bool:
+    folded = database.casefold()
+    return any(folded == title.casefold() for title in config.TIER1_DATABASE_TITLES)
+
+
 def classify(page: dict) -> int | None:
     """Return the page tier, or ``None`` when the page must be excluded."""
     title, database = _page_text(page)
@@ -53,6 +65,14 @@ def classify(page: dict) -> int | None:
 
     if _contains_keyword(combined, config.EXCLUDE_TITLE_KEYWORDS):
         return None
+    if _has_exact_tag(page.get("tags", []), config.TAG_TIER1):
+        return 1
+    if _has_tier1_database(database):
+        return 1
+    if _has_exact_tag(page.get("tags", []), config.TAG_TIER4):
+        return 4
+    if _has_exact_tag(page.get("tags", []), config.TAG_TIER2):
+        return 2
     if _contains_keyword(combined, config.TIER1_KEYWORDS):
         return 1
     if _contains_keyword(combined, config.TIER2_KEYWORDS):

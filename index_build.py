@@ -86,9 +86,24 @@ def embed_text(record: dict) -> str:
 
     A chunk split off by heading does not contain the page title, so a question
     naming the page ("クイズアプリのデプロイ") would miss the chunks that hold
-    the actual steps and match only the near-empty first chunk. The stored text
-    stays unchanged; only the vector carries the title and heading path.
+    the actual steps and match only the near-empty first chunk. Legacy records
+    still use the title and heading prefix here; current records carry their
+    compact title/tag header in the stored chunk text.
     """
+    # Records written by prepare.py already contain the compact title/tag
+    # header. Keep legacy records (without the tags field) source-compatible
+    # with the old title/heading prefix used by existing local indexes.
+    if "tags" in record:
+        title = str(record.get("title", ""))
+        text = record.get("text", "")
+        title_line = f"# {title}"
+        if text.startswith(title_line) or text.startswith(f"[{title}]"):
+            return text
+        header = f"[{title}]"
+        if record.get("tags"):
+            header += f" タグ: {record['tags']}"
+        return f"{header}\n\n{text}"
+
     header = [record.get("title", "")]
     if record.get("heading_path"):
         header.append(record["heading_path"])
@@ -287,6 +302,7 @@ def main() -> int:
                     "has_image": record["has_image"],
                     "image_links": record["image_links"],
                     "heading_path": record.get("heading_path", ""),
+                    "tags": str(record.get("tags", ""))[: config.TAG_METADATA_MAX_CHARS],
                     "embed_model": config.EMBED_MODEL,
                 }
                 for record in batch

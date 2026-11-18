@@ -24,32 +24,55 @@ const post = async (path: string, body: unknown, apiKey: string, timeoutMs: numb
   return JSON.parse(text);
 };
 
-export const embedQuery = async (text: string, apiKey: string): Promise<number[]> => {
+export const embedQuery = async (text: string, apiKey: string, timeoutMs = EMBED_TIMEOUT_MS): Promise<number[]> => {
   const data = await post(
     "embeddings",
     { model: EMBED_MODEL, input: [text], dimensions: EMBED_DIMENSIONS },
     apiKey,
-    EMBED_TIMEOUT_MS,
+    timeoutMs,
   );
   const vector = data?.data?.[0]?.embedding;
   if (!Array.isArray(vector)) throw new Error("openai embeddings: no vector in response");
   return vector;
 };
 
-export const chat = async (system: string, user: string, apiKey: string): Promise<string> => {
+type ChatOptions = {
+  json?: boolean;
+  maxTokens?: number;
+};
+
+export const chat = async (
+  system: string,
+  user: string,
+  apiKey: string,
+  timeoutMs = GEN_TIMEOUT_MS,
+  options: ChatOptions = {},
+): Promise<string> => {
   const data = await post(
     "chat/completions",
     {
       model: GEN_MODEL,
       temperature: GEN_TEMPERATURE,
-      max_tokens: GEN_MAX_TOKENS,
+      max_tokens: options.maxTokens ?? GEN_MAX_TOKENS,
+      ...(options.json ? { response_format: { type: "json_object" } } : {}),
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
       ],
     },
     apiKey,
-    GEN_TIMEOUT_MS,
+    timeoutMs,
   );
   return String(data?.choices?.[0]?.message?.content ?? "").trim();
+};
+
+export const chatJson = async (
+  system: string,
+  user: string,
+  apiKey: string,
+  timeoutMs: number,
+): Promise<unknown> => {
+  const raw = await chat(system, user, apiKey, timeoutMs, { json: true, maxTokens: 128 });
+  const withoutFence = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  return JSON.parse(withoutFence);
 };

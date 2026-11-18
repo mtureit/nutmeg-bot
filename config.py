@@ -38,8 +38,56 @@ CHUNK_BUDGET = int(
 )
 
 # --- page selection ---
-# Personal records (1on1 notes, member profiles) are excluded for privacy.
-EXCLUDE_TITLE_KEYWORDS = ["よもやま", "雑談", "アイスブレイク", "1on1", "メンバーデータベース"]
+# Personal profile and casual-chat records are excluded for privacy. 1on1 pages
+# remain eligible; their tier is controlled by TAG_TIER4 when tagged.
+EXCLUDE_TITLE_KEYWORDS = ["よもやま", "雑談", "アイスブレイク", "メンバーデータベース"]
+TAG_TIER1 = [
+    "引き継ぎ",
+    "SeeFT引き継ぎ",
+    "環境構築",
+    "デプロイ",
+    "勉強会",
+    "ドキュメント",
+    "PJ_Documents",
+]
+TAG_TIER4 = [
+    "定例MTG",
+    "MT",
+    "作業ログ",
+    "議事録",
+    "1on1",
+    "よもやま",
+    "進捗報告",
+    "最強二枚看板会議",
+    "PMMT",
+    "ヒアリング",
+]
+TAG_TIER2 = [
+    "インフラ",
+    "infra",
+    "Kubernetes",
+    "Docker",
+    "Github",
+    "DB",
+    "api",
+    "Go",
+    "Next.js",
+    "TypeScript",
+    "React",
+    "Ruby",
+    "BE",
+    "フロントエンド",
+    "NUTMEGクラウド",
+    "ハッカソン",
+]
+TIER1_DATABASE_TITLES = [
+    "用語集",
+    "引継ぎまとめ",
+    "backend-knowledge",
+    "デプロイ",
+    "k8s, CI/CD",
+    "Linux - コマンド",
+]
 TIER1_KEYWORDS = [
     "手順",
     "マニュアル",
@@ -61,11 +109,12 @@ TIER2_KEYWORDS = ["企画", "プロジェクト", "概要", "要件", "振り返
 TIER4_KEYWORDS = ["MT", "mtg", "ミーティング", "定例", "議事録"]
 
 # --- chunking ---
-CHUNKER_VERSION = 2
+CHUNKER_VERSION = 3
 CHUNK_TARGET_CHARS = 1200
 CHUNK_MIN_CHARS = 300
 CHUNK_MAX_CHARS = 1500
 CHUNK_OVERLAP = 150
+TAG_METADATA_MAX_CHARS = 200
 
 # --- retrieval ---
 TOP_K = 5
@@ -97,8 +146,20 @@ MAX_CONSECUTIVE_NON_FITTING_PAGES = 200
 # Skipped even when under a root page. Databases of personal profiles
 # (phone, birthday, email) are excluded for privacy.
 NOTION_EXCLUDE_PAGE_IDS: list[str] = [
-    "284783e8-ea0d-4059-b30a-c4493ac6efc2",  # Profile
-    "27941f19-2063-8039-acca-f5c5fbea70e1",  # メンバーデータベース
+    "284783e8-ea0d-4059-b30a-c4493ac6efc2",  # Profile (old) database
+    "27941f19-2063-8039-acca-f5c5fbea70e1",  # メンバーデータベース database
+    "ef1f844d-6740-4d48-8025-8358d472a8a5",  # Profile (2026) database
+    "2dd82cae-ae96-4ab1-ba01-56cc83ffef5b",  # Profile (2026) data source
+    "f64e82c8-3f8f-40c3-a43a-a27329720153",  # Profile (old) data source
+    "27941f19-2063-804f-b861-000b2855ae14",  # メンバーデータベース data source
+    "06e8c716-a0fb-4f79-b29d-7a4c22d7a628",  # 個人メモ database
+    "0451f7f2-b562-44d7-be81-5bff9da547aa",  # 個人メモ data source
+    "35141f19-2063-80be-856c-c1fcc631c3a3",  # メンター振り返り database
+    "35141f19-2063-8066-9762-000b1f1c95bf",  # メンター振り返り data source
+    "35141f19-2063-8077-8769-e805f7d76005",  # メンター振り返り一覧 database
+    "35141f19-2063-80b0-90cc-000bee4b4d51",  # メンター振り返り一覧 data source
+    "25aa47a6-0726-473e-927d-8b78d69e85de",  # みんなの予定（空いている時間） database
+    "396decef-74bd-4fc9-93a1-0b256ad3cae8",  # みんなの予定（空いている時間） data source
 ]
 ALLOWED_SLACK_CHANNELS: list[str] = []  # empty list = every channel allowed
 ALLOW_GUEST_USERS = False  # refuse single-channel / multi-channel guests

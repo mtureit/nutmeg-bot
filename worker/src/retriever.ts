@@ -1,9 +1,27 @@
 // Vectorize nearest-neighbour search with a similarity threshold and page-level
 // neighbour expansion. Chunk ids are `${pageId}-${seq}`.
 
-import { MAX_CONTEXT_CHARS, SIM_THRESHOLD, TOP_K } from "./config";
+import { EMBED_TIMEOUT_MS, MAX_CONTEXT_CHARS, SIM_THRESHOLD, SLACK_RESPONSE_RESERVE_MS, TOP_K } from "./config";
 import { embedQuery } from "./openai";
 import type { Context, Env } from "./types";
+
+export type RequestDeadline = {
+  readonly startedAt: number;
+  readonly limitMs: number;
+  remaining(): number;
+};
+
+export const createDeadline = (limitMs: number): RequestDeadline => {
+  const startedAt = Date.now();
+  return {
+    startedAt,
+    limitMs,
+    remaining: () => Math.max(0, limitMs - (Date.now() - startedAt)),
+  };
+};
+
+export const usableRemaining = (deadline: RequestDeadline): number =>
+  Math.max(0, deadline.remaining() - SLACK_RESPONSE_RESERVE_MS);
 
 type ChunkId = { pageId: string; seq: number };
 
@@ -59,8 +77,10 @@ const contextFromVector = (vector: { id: string; metadata?: unknown }): Context 
   };
 };
 
-export const searchAll = async (env: Env, question: string): Promise<Context[]> => {
-  const vector = await embedQuery(question, env.OPENAI_API_KEY);
+export const searchAll = async (env: Env, question: string, deadline?: RequestDeadline): Promise<Context[]> => {
+  const timeoutMs = deadline ? Math.min(EMBED_TIMEOUT_MS, usableRemaining(deadline)) : EMBED_TIMEOUT_MS;
+  if (timeoutMs <= 0) throw new Error("request deadline exceeded before embedding");
+  const vector = await embedQuery(question, env.OPENAI_API_KEY, timeoutMs);
   const result = await env.VECTORIZE.query(vector, { topK: TOP_K, returnMetadata: "all" });
   return (result.matches ?? []).map((match) => contextFromMatch(match));
 };
@@ -98,6 +118,7 @@ const renderPage = (group: PageGroup): Context => {
     .sort((a, b) => b.similarity - a.similarity)[0];
   const metadata: Record<string, unknown> = {
     ...(bestHit?.metadata ?? chunks[0]?.metadata ?? {}),
+    page_id: group.pageId,
     ...(title ? { title } : {}),
   };
   const links = imageLinks(chunks);
@@ -173,9 +194,9 @@ export const expandHits = async (env: Env, hits: Context[]): Promise<Context[]> 
 };
 
 /** Contexts above the threshold, expanded to neighbouring chunks by page. */
-export const search = async (env: Env, question: string): Promise<Context[] | null> => {
-  const hits = await searchAll(env, question);
-  if (hits.length === 0 || hits[0].similarity < SIM_THRESHOLD) return null;
+export const search = async (env: Env, question: string, deadline?: RequestDeadline): Promise<Context[] | null> => {
+  const hits = await searchAll(env, question, deadline);
+  if (hits.length === 0 || !hits.some((hit) => hit.similarity >= SIM_THRESHOLD)) return null;
   const contexts = await expandHits(env, hits);
   return contexts.length > 0 ? contexts : null;
 };

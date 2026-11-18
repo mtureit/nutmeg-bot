@@ -30,7 +30,9 @@ Notion のドメイン知識を RAG で検索し、Slack で質問に答える�
 - **Notion データベース対応**（2026-10-16 追加）: ページ内の `child_database` を**どの深さでも**探し
   （列・コールアウトの中も）、各行をページとして取り込む。行のプロパティは `- 名前: 値` で本文の前に置く。
   API 2025-09-03 のため行は `databases.retrieve` → `data_sources.query` で取る（`databases.query` は旧方式）。
-  ルート ID に DB の ID を直接書いてもよい。relation / rollup は ID しか持たないので出力しない。
+  `Tag` / `Tags` relation は参照先データソースを一度だけ全件取得してタグ名に解決する。has_more の relation は
+  `pages.properties.retrieve` で追加取得し、タグ以外の relation はIDを本文に出さない。
+  ルート ID に DB の ID を直接書いてもよい。Tag/Tags 以外の relation / rollup はIDを出力しない。
   リンクドビュー（`unsupported` ブロック）は API が中身を返さないため読めない。元の DB を接続すること
   - ルート ID モードは探索時にブロックを全階層取得し、レコードに保持して `process_page` で再利用する（二重取得しない）。
     token-only モードは Phase A で検索結果と DB 行のメタデータだけを集め、Phase B で優先順位・予算順に必要なページの
@@ -48,7 +50,9 @@ Notion のドメイン知識を RAG で検索し、Slack で質問に答える�
   約 3% の余裕を残し、`config.CHUNK_BUDGET` の既定値 9,500 チャンク以内で選ぶ。
   `selection.py` がページタイトルと親データベース名を判定し、手順・規約・設計などを Tier 1、
   企画・要件などを Tier 2、その他を Tier 3、議事録・定例・日付タイトルなどを Tier 4 とする。
-  よもやま・雑談・アイスブレイクは常に除外し、キーワードリストは `config.py` で編集する。
+  タグTier 1 → Tier 1 DB名 → タグTier 4 → タグTier 2 → 既存ルールの順で判定する。タグによる除外は行わず、
+  `1on1` も許可する。Profile、メンバー／メンター個人DB、個人メモ、予定DBはDB／データソースIDを
+  `config.NOTION_EXCLUDE_PAGE_IDS` に併記して祖先判定で除外する。
   `prepare.py` の `--budget 0` は無制限。実行時の `data/selected.json` を `index_build.py` が読み、
   選択外 JSONL を除外して stale チャンクを削除する。無料枠超過は埋め込み前に停止する。
 - **チャンクと増分更新**: `chunking.py` は見出しセクションを `CHUNK_TARGET_CHARS=1200` まで連結し、

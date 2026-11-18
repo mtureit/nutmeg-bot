@@ -55,6 +55,7 @@ def build_metadata(record: dict) -> dict:
         "has_image": bool(record["has_image"]),
         "image_links": record["image_links"],
         "heading_path": record.get("heading_path", ""),
+        "tags": str(record.get("tags", ""))[: config.TAG_METADATA_MAX_CHARS],
         "embed_model": config.EMBED_MODEL,
     }
 
