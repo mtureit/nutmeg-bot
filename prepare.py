@@ -218,6 +218,9 @@ def fetch_database_rows(
     query_cache: dict[str, list[dict]] | None = None,
     source_ids: dict[str, str] | None = None,
     excluded_data_source_ids: set[str] | None = None,
+    skipped_content_ids: set[str] | None = None,
+    skipped_page_ids: set[str] | None = None,
+    logged_skipped_data_source_ids: set[str] | None = None,
 ) -> tuple[str, list[dict]]:
     """Return a database's title and every row (as page objects).
 
@@ -238,6 +241,11 @@ def fetch_database_rows(
     excluded_keys = {
         config.normalize_id(source_id) for source_id in (excluded_data_source_ids or set())
     }
+    skipped_keys = {
+        config.normalize_id(content_id) for content_id in (skipped_content_ids or set())
+    }
+    database_key = config.normalize_id(database_id)
+    database_is_skipped = database_key in skipped_keys
     for source in database.get("data_sources", []):
         source_id = source["id"]
         if config.normalize_id(source_id) in excluded_keys:
@@ -250,9 +258,37 @@ def fetch_database_rows(
             source_rows = _query_data_source(source_id)
             if query_cache is not None:
                 query_cache[source_key] = source_rows
-        rows.extend(source_rows)
+
+        candidate_rows: list[dict] = []
+        skipped_row_count = 0
+        source_is_skipped = database_is_skipped or source_key in skipped_keys
+        for row in source_rows:
+            parent = row.get("parent", {})
+            parent_ids = (
+                parent.get("data_source_id"),
+                parent.get("database_id"),
+            )
+            row_is_skipped = source_is_skipped or any(
+                parent_id
+                and config.normalize_id(parent_id) in skipped_keys
+                for parent_id in parent_ids
+            )
+            if row_is_skipped:
+                skipped_row_count += 1
+                if skipped_page_ids is not None and row.get("id"):
+                    skipped_page_ids.add(config.normalize_id(row["id"]))
+                continue
+            candidate_rows.append(row)
+
+        if source_is_skipped or skipped_row_count:
+            _log_skipped_data_source(
+                source_id,
+                len(source_rows) if source_is_skipped else skipped_row_count,
+                logged_skipped_data_source_ids,
+            )
+        rows.extend(candidate_rows)
         if source_ids is not None:
-            for row in source_rows:
+            for row in candidate_rows:
                 if row.get("id"):
                     source_ids[config.normalize_id(row["id"])] = source_id
     return title, rows
@@ -277,6 +313,20 @@ def _query_data_source(data_source_id: str) -> list[dict]:
             break
         cursor = response.get("next_cursor")
     return rows
+
+
+def _log_skipped_data_source(
+    data_source_id: str,
+    row_count: int,
+    logged_data_source_ids: set[str] | None,
+) -> None:
+    """Log one row-count summary for each skipped data source per discovery."""
+    key = config.normalize_id(data_source_id)
+    if logged_data_source_ids is not None and key in logged_data_source_ids:
+        return
+    logger.info("skipped data source by config: %s (%d rows)", data_source_id, row_count)
+    if logged_data_source_ids is not None:
+        logged_data_source_ids.add(key)
 
 
 def _load_data_source_schema(
@@ -401,6 +451,8 @@ def _resolve_tags(
     source_ids: dict[str, str],
     query_cache: dict[str, list[dict]],
     excluded_data_source_ids: set[str],
+    skipped_content_ids: set[str] | None = None,
+    logged_skipped_data_source_ids: set[str] | None = None,
 ) -> None:
     """Resolve Tag/Tags relations for Phase A candidates in one pass."""
     schema_cache: dict[str, dict] = {}
@@ -439,6 +491,9 @@ def _resolve_tags(
             target_ids.update(relation_targets)
 
     names_by_source: dict[str, dict[str, str]] = {}
+    skipped_keys = {
+        config.normalize_id(content_id) for content_id in (skipped_content_ids or set())
+    }
     for data_source_id in target_ids:
         source_key = config.normalize_id(data_source_id)
         if source_key in excluded_data_source_ids:
@@ -452,6 +507,12 @@ def _resolve_tags(
                 logger.info("タグデータソースを取得できません (%s): %s", data_source_id, exc)
                 rows = []
             query_cache[source_key] = rows
+        if source_key in skipped_keys:
+            _log_skipped_data_source(
+                data_source_id,
+                len(rows),
+                logged_skipped_data_source_ids,
+            )
         names_by_source[source_key] = {
             config.normalize_id(row["id"]): _page_title(row)
             for row in rows
@@ -527,11 +588,17 @@ def _is_database_row(page: dict) -> bool:
 
 
 class _NotionAncestorResolver:
-    """Resolve Notion parents once and test whether an object is excluded."""
+    """Resolve Notion parents once and test configured content boundaries."""
 
-    def __init__(self, notion, excluded: set[str]):
+    def __init__(
+        self,
+        notion,
+        excluded: set[str],
+        skipped_content_ids: set[str] | None = None,
+    ):
         self.notion = notion
         self.excluded = excluded
+        self.skipped_content_ids = skipped_content_ids or set()
         self.objects: dict[tuple[str, str], dict] = {}
         self._inaccessible: dict[tuple[str, str], BaseException] = {}
         self._logged_inaccessible: set[tuple[str, str]] = set()
@@ -647,7 +714,13 @@ class _NotionAncestorResolver:
             exc,
         )
 
-    def is_excluded(self, object_type: str, object_id: str, obj: dict | None = None) -> bool:
+    def _is_marked(
+        self,
+        object_type: str,
+        object_id: str,
+        obj: dict | None,
+        marked_ids: set[str],
+    ) -> bool:
         current_type = object_type
         current_id = object_id
         current_obj = obj
@@ -655,18 +728,18 @@ class _NotionAncestorResolver:
 
         while True:
             key = (current_type, config.normalize_id(current_id))
-            if key[1] in self.excluded:
+            if key[1] in marked_ids:
                 return True
             if current_obj is not None:
                 parent = current_obj.get("parent", {})
-                if parent.get("type") == "data_source_id":
+                if parent.get("type") in ("data_source_id", "database_id"):
                     parent_ids = (
                         parent.get("data_source_id"),
                         parent.get("database_id"),
                     )
                     if any(
                         parent_id
-                        and config.normalize_id(parent_id) in self.excluded
+                        and config.normalize_id(parent_id) in marked_ids
                         for parent_id in parent_ids
                     ):
                         return True
@@ -685,6 +758,16 @@ class _NotionAncestorResolver:
                 return False
             current_type, current_id = reference
             current_obj = None
+
+    def is_excluded(self, object_type: str, object_id: str, obj: dict | None = None) -> bool:
+        return self._is_marked(object_type, object_id, obj, self.excluded)
+
+    def is_skipped_content(
+        self, object_type: str, object_id: str, obj: dict | None = None
+    ) -> bool:
+        return self._is_marked(
+            object_type, object_id, obj, self.skipped_content_ids
+        )
 
     def database_title(self, page: dict) -> str:
         """Resolve the owning database title for a page reached by any path."""
@@ -806,10 +889,15 @@ def discover_pages(
     discover_pages.last_phase_a_failure_count = 0
     notion = _get_notion()
     excluded = {config.normalize_id(pid) for pid in config.NOTION_EXCLUDE_PAGE_IDS}
-    ancestors = _NotionAncestorResolver(notion, excluded)
+    skipped_content_ids = {
+        config.normalize_id(content_id) for content_id in config.SKIP_CONTENT_IDS
+    }
+    ancestors = _NotionAncestorResolver(notion, excluded, skipped_content_ids)
     excluded_data_source_ids = set(excluded)
     data_source_rows_cache: dict[str, list[dict]] = {}
     page_source_ids: dict[str, str] = {}
+    skipped_page_ids: set[str] = set()
+    logged_skipped_data_source_ids: set[str] = set()
     seen: set[str] = set()
     pages: list[dict] = []
     root_keys = {config.normalize_id(root_id) for root_id in root_ids}
@@ -869,6 +957,9 @@ def discover_pages(
                 query_cache=data_source_rows_cache,
                 source_ids=page_source_ids,
                 excluded_data_source_ids=excluded_data_source_ids,
+                skipped_content_ids=skipped_content_ids,
+                skipped_page_ids=skipped_page_ids,
+                logged_skipped_data_source_ids=logged_skipped_data_source_ids,
             )
         except _NOTION_READ_ERRORS as exc:
             # Linked views of databases outside the connected pages land here.
@@ -885,6 +976,10 @@ def discover_pages(
         """Apply the common Phase A exclusion and build a metadata record."""
         page_id = page.get("id")
         if not page_id:
+            return False
+        if config.normalize_id(page_id) in skipped_page_ids or ancestors.is_skipped_content(
+            "page", page_id, page
+        ):
             return False
         if ancestors.is_excluded("page", page_id, page):
             logger.info("excluded by config: %s", page_id)
@@ -963,6 +1058,8 @@ def discover_pages(
             source_ids=page_source_ids,
             query_cache=data_source_rows_cache,
             excluded_data_source_ids=excluded_data_source_ids,
+            skipped_content_ids=skipped_content_ids,
+            logged_skipped_data_source_ids=logged_skipped_data_source_ids,
         )
         return pages
 
@@ -979,6 +1076,10 @@ def discover_pages(
 
         if kind == "row":
             page, database_title = payload
+            if config.normalize_id(item_id) in skipped_page_ids or ancestors.is_skipped_content(
+                "page", item_id, page
+            ):
+                continue
             if ancestors.is_excluded("page", item_id, page):
                 logger.info("excluded by config: %s", item_id)
                 continue
@@ -1010,6 +1111,8 @@ def discover_pages(
             database_title = ancestors.database_title(page)
 
         seen.add(key)
+        if key in skipped_page_ids or ancestors.is_skipped_content("page", item_id, page):
+            continue
         if ancestors.is_excluded("page", item_id, page):
             logger.info("excluded by config: %s", item_id)
             continue
@@ -1061,6 +1164,8 @@ def discover_pages(
         source_ids=page_source_ids,
         query_cache=data_source_rows_cache,
         excluded_data_source_ids=excluded_data_source_ids,
+        skipped_content_ids=skipped_content_ids,
+        logged_skipped_data_source_ids=logged_skipped_data_source_ids,
     )
     return pages
 

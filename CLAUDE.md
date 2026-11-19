@@ -53,6 +53,8 @@ Notion のドメイン知識を RAG で検索し、Slack で質問に答える�
   タグTier 1 → Tier 1 DB名 → タグTier 4 → タグTier 2 → 既存ルールの順で判定する。タグによる除外は行わず、
   `1on1` も許可する。Profile、メンバー／メンター個人DB、個人メモ、予定DBはDB／データソースIDを
   `config.NOTION_EXCLUDE_PAGE_IDS` に併記して祖先判定で除外する。
+  タグ名だけの Tag Library 等は `config.SKIP_CONTENT_IDS` に併記し、候補本文からは除外するが
+  `Tag` / `Tags` の名前解決では参照する。
   `prepare.py` の `--budget 0` は無制限。実行時の `data/selected.json` を `index_build.py` が読み、
   選択外 JSONL を除外して stale チャンクを削除する。無料枠超過は埋め込み前に停止する。
 - **チャンクと増分更新**: `chunking.py` は見出しセクションを `CHUNK_TARGET_CHARS=1200` まで連結し、

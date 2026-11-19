@@ -93,6 +93,8 @@ Cloudflare Vectorize の無料枠は保存次元数 5,000,000 です。512 次�
 除外対象の Profile、メンバー／メンターの個人DB、個人メモ、予定DBは `config.py` の
 `NOTION_EXCLUDE_PAGE_IDS` にDB IDとデータソースIDを併記しています。除外・キーワードは
 `config.py` で編集できます。
+Tag Library などタグ名だけを持つデータソースは `config.SKIP_CONTENT_IDS` に併記しています。
+これらは候補本文には取り込まず、`Tag` / `Tags` の名前解決だけに使います。
 Tier 判定は Phase A のメタデータだけで行い、本文ブロックは Phase B で優先順位と予算に応じて遅延取得します。
 
 実行時に `data/selected.json` が選ばれたページ ID とチャンク数を記録します。

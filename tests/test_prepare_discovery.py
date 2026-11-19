@@ -236,6 +236,39 @@ def test_data_source_in_search_walks_its_database(fake):
     assert pages[0]["database"] == "論文管理_DB"
 
 
+def test_skip_content_rows_are_not_candidates_in_root_or_search(fake, monkeypatch, caplog):
+    row = fake._rows["ds1"][0]
+    row["parent"] = {
+        "type": "data_source_id",
+        "data_source_id": "ds1",
+        "database_id": DB,
+    }
+    fake._pages["row1"] = row
+    monkeypatch.setattr(prepare.config, "NOTION_EXCLUDE_PAGE_IDS", [])
+    monkeypatch.setattr(prepare.config, "SKIP_CONTENT_IDS", [DB, "ds1"])
+    caplog.set_level(logging.INFO)
+
+    root_pages = prepare.discover_pages([ROOT])
+
+    assert [page["title"] for page in root_pages] == ["研究管理"]
+    assert "row1" not in fake.children_calls
+    assert prepare.discover_pages.last_discovered_page_count == 1
+    assert sum("skipped data source by config: ds1 (1 rows)" in message for message in caplog.messages) == 1
+
+    fake.search_results = [
+        {
+            "object": "data_source",
+            "id": "ds1",
+            "parent": {"type": "database_id", "database_id": DB},
+        },
+        row,
+    ]
+    search_pages = prepare.discover_pages([])
+
+    assert search_pages == []
+    assert prepare.discover_pages.last_discovered_page_count == 0
+
+
 def test_row_found_by_search_keeps_its_properties(fake):
     row = fake._rows["ds1"][0]
     row["parent"] = {"type": "data_source_id", "data_source_id": "ds1"}

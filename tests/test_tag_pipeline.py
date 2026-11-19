@@ -20,6 +20,7 @@ TAG_BETA = "tag-beta-00000000000000000000000000000"
 TAG_UNKNOWN = "tag-unknown-00000000000000000000000000"
 ROW_DATA_SOURCE = "row-source-00000000000000000000000000"
 ROW_DATABASE = "row-database-0000000000000000000000000"
+TAG_DATABASE = "tag-database-000000000000000000000000"
 
 
 def title_property(title: str) -> dict:
@@ -209,6 +210,64 @@ def test_tag_relations_resolve_names_once_and_follow_property_pagination(monkeyp
     assert notion.query_calls == [TAG_SOURCE]
     assert [call.get("start_cursor") for call in notion.property_calls] == [None, "cursor-2"]
     assert all(TAG_UNKNOWN not in page["tags"] for page in pages)
+
+
+def test_skipped_tag_data_source_is_not_candidate_but_resolves_tag_names(
+    monkeypatch, caplog
+):
+    tag_row = notion_page(
+        TAG_ALPHA,
+        "インフラ",
+        parent={
+            "type": "data_source_id",
+            "data_source_id": TAG_SOURCE,
+            "database_id": TAG_DATABASE,
+        },
+    )
+    content_page = notion_page(
+        "content-page-0000000000000000000000000",
+        "Content",
+        properties={
+            "Tags": {
+                "type": "relation",
+                "relation": {
+                    "data_source_id": TAG_SOURCE,
+                    "results": [{"id": TAG_ALPHA}],
+                },
+            }
+        },
+        parent={"type": "workspace"},
+    )
+    notion = FakeNotion(
+        search_results=[
+            {
+                "object": "data_source",
+                "id": TAG_SOURCE,
+                "parent": {"type": "database_id", "database_id": TAG_DATABASE},
+            },
+            content_page,
+        ],
+        data_source_rows={TAG_SOURCE: [tag_row]},
+        databases={
+            TAG_DATABASE: {
+                "object": "database",
+                "id": TAG_DATABASE,
+                "title": [{"plain_text": "Tag Library"}],
+                "data_sources": [{"id": TAG_SOURCE}],
+            }
+        },
+    )
+    monkeypatch.setattr(prepare, "_get_notion", lambda: notion)
+    monkeypatch.setattr(prepare.config, "NOTION_EXCLUDE_PAGE_IDS", [])
+    monkeypatch.setattr(prepare.config, "SKIP_CONTENT_IDS", [TAG_SOURCE, TAG_DATABASE])
+    caplog.set_level("INFO")
+
+    pages = prepare.discover_pages([])
+
+    assert [page["title"] for page in pages] == ["Content"]
+    assert pages[0]["tags"] == ["インフラ"]
+    assert notion.query_calls == [TAG_SOURCE]
+    assert sum("skipped data source by config" in message for message in caplog.messages) == 1
 
 
 def test_tag_markdown_uses_names_and_skips_other_relation_ids():

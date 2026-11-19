@@ -161,6 +161,14 @@ NOTION_EXCLUDE_PAGE_IDS: list[str] = [
     "25aa47a6-0726-473e-927d-8b78d69e85de",  # みんなの予定（空いている時間） database
     "396decef-74bd-4fc9-93a1-0b256ad3cae8",  # みんなの予定（空いている時間） data source
 ]
+# Tag libraries are queried for Tag/Tags name resolution but are not content.
+SKIP_CONTENT_IDS: list[str] = [
+    "2f29a434-8408-4415-91a5-df96a13ad0e2",  # Tag Library (current) database
+    "ac4f4aba-5d42-4bb0-9757-1bd146a880c4",  # Tag Library (current) data source
+    "98fb4bcf-ef76-4b7f-aa4b-4a0284bfcc1f",  # Tag Library (old) database
+    "371540af-6c36-41c0-8e7a-c97c44169c32",  # Tag Library (old) data source
+    "dca1f901-4c1f-471a-a6a0-b7737e9e8678",  # デザインスペース_tags data source
+]
 ALLOWED_SLACK_CHANNELS: list[str] = []  # empty list = every channel allowed
 ALLOW_GUEST_USERS = False  # refuse single-channel / multi-channel guests
 

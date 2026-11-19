@@ -8,9 +8,10 @@
 //   cd worker && bun run ask --hits "質問"   # also list the top hits and scores
 
 import { answer } from "../src/index";
-import { parseCommand } from "../src/notion";
+import { handleCommand, parseCommand } from "../src/notion";
 import { searchAll } from "../src/retriever";
-import { SIM_THRESHOLD } from "../src/config";
+import { REQUEST_DEADLINE_MS, SIM_THRESHOLD } from "../src/config";
+import { createDeadline } from "../src/retriever";
 import type { Env } from "../src/types";
 
 const need = (name: string): string => {
@@ -84,5 +85,11 @@ if (showHits && needsVectorize) {
   console.log("---");
 }
 
-const { text } = await answer(env, question);
-console.log(text);
+// Commands take the same path as in Slack (index.ts runs handleCommand before answer).
+const commandReply = await handleCommand(env, question, createDeadline(REQUEST_DEADLINE_MS));
+if (commandReply !== null) {
+  console.log(commandReply);
+} else {
+  const { text } = await answer(env, question);
+  console.log(text);
+}
