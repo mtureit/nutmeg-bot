@@ -1,7 +1,6 @@
 import {
   EXCLUDED_NOTION_IDS,
   EXCLUDE_TITLE_KEYWORDS,
-  LIVE_FALLBACK_MIN_REMAINING_MS,
   LIVE_KEYWORD_TIMEOUT_MS,
   LIVE_PAGE_MAX_CHARS,
   NOTION_ARTICLES_DATA_SOURCE_ID,
@@ -55,11 +54,26 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promise((
   signal?.addEventListener("abort", abort, { once: true });
 });
 
+// Cloudflare Workers Free allows 50 outbound fetches per invocation. Each NotionClient
+// gets its own cap so one answer stays well under it:
+//   fixed (users.info, embedding, keyword chat, answer chat, second chat, postMessage) ~6
+//   + live fallback 24 + related pages 6 = ~36; commands use up to 40 alone.
+export const NOTION_BUDGET_COMMAND = 40;
+export const NOTION_BUDGET_LIVE = 24;
+export const NOTION_BUDGET_RELATED = 6;
+
 export class NotionClient {
   private readonly token: string;
+  private readonly maxRequests: number;
+  private used = 0;
 
-  constructor(token: string) {
+  constructor(token: string, maxRequests = NOTION_BUDGET_COMMAND) {
     this.token = token;
+    this.maxRequests = maxRequests;
+  }
+
+  get requestCount(): number {
+    return this.used;
   }
 
   async request(
@@ -72,6 +86,9 @@ export class NotionClient {
     if (signal?.aborted) return null;
     const remaining = Math.max(0, deadline.remaining() - SLACK_RESPONSE_RESERVE_MS);
     if (remaining <= 0) return null;
+    // Out of budget: behave like a failed call (live pages are then dropped fail-closed).
+    if (this.used >= this.maxRequests) return null;
+    this.used += 1;
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${this.token}`);
     headers.set("Notion-Version", NOTION_VERSION);
@@ -231,13 +248,19 @@ const groupTags = (rows: TagRow[]): Tag[] => {
   return [...groups.values()];
 };
 
-const cachedTagGroups = (value: unknown): Tag[] => {
-  if (!Array.isArray(value)) return [];
-  return value.map(objectOf).map((item) => ({
+const parseCachedTagGroup = (value: unknown): Tag | null => {
+  const item = objectOf(value);
+  const tag = {
     name: stringOf(item.name).trim(),
     ids: arrayOf(item.ids).map(stringOf).filter(Boolean),
-  })).filter((tag) => tag.name && tag.ids.length > 0);
+  };
+  return tag.name && tag.ids.length > 0 ? tag : null;
 };
+
+const cachedTagGroups = (value: unknown): Tag[] =>
+  Array.isArray(value)
+    ? value.map(parseCachedTagGroup).filter((tag): tag is Tag => tag !== null)
+    : [];
 
 export const getTagLibrary = async (
   env: Env,
@@ -255,11 +278,11 @@ export const getTagLibrary = async (
 const readCachedTagCounts = async (env: Env): Promise<TagCount[] | null> => {
   const cached = await cacheGet(env, "cache:tagcounts:v2");
   if (!Array.isArray(cached)) return null;
-  const counts = cached.map(objectOf).map((item) => ({
-    name: stringOf(item.name).trim(),
-    ids: arrayOf(item.ids).map(stringOf).filter(Boolean),
-    count: Number(item.count),
-  })).filter((tag) => tag.name && tag.ids.length > 0 && Number.isFinite(tag.count));
+  const counts = cached.map((item) => {
+    const tag = parseCachedTagGroup(item);
+    const count = Number(objectOf(item).count);
+    return tag && Number.isFinite(count) ? { ...tag, count } : null;
+  }).filter((tag): tag is TagCount => tag !== null);
   return counts;
 };
 
@@ -277,14 +300,28 @@ export const getTagCounts = async (
   ]);
   if (!library.complete || !articles.complete) return { tags: library.tags.map((tag) => ({ ...tag, count: 0 })), complete: false };
 
-  const tags = library.tags.map((tag) => {
-    const ids = new Set(tag.ids.map(normalizeNotionId));
-    const count = articles.rows.filter((article) => {
-      if (isExcludedNotionId(stringOf(article.id))) return false;
-      return relationIds(article).some((id) => ids.has(normalizeNotionId(id)));
-    }).length;
-    return { ...tag, count };
-  });
+  const groupKeyById = new Map<string, string>();
+  const countByGroup = new Map<string, number>();
+  for (const tag of library.tags) {
+    const groupKey = tagNameKey(tag.name);
+    countByGroup.set(groupKey, 0);
+    for (const id of tag.ids) groupKeyById.set(normalizeNotionId(id), groupKey);
+  }
+
+  for (const article of articles.rows) {
+    if (isExcludedNotionId(stringOf(article.id))) continue;
+    const groups = new Set<string>();
+    for (const id of relationIds(article)) {
+      const groupKey = groupKeyById.get(normalizeNotionId(id));
+      if (groupKey) groups.add(groupKey);
+    }
+    for (const groupKey of groups) countByGroup.set(groupKey, (countByGroup.get(groupKey) ?? 0) + 1);
+  }
+
+  const tags = library.tags.map((tag) => ({
+    ...tag,
+    count: countByGroup.get(tagNameKey(tag.name)) ?? 0,
+  }));
   await cachePut(env, "cache:tagcounts:v2", tags);
   return { tags, complete: true };
 };
@@ -536,7 +573,7 @@ const pageMarkdown = async (
   return [`# ${title}`.trim(), redacted].filter(Boolean).join("\n\n").slice(0, LIVE_PAGE_MAX_CHARS);
 };
 
-const keywordsFor = async (
+export const keywordsFor = async (
   env: Env,
   question: string,
   deadline: RequestDeadline,
@@ -557,20 +594,28 @@ const keywordsFor = async (
   return raw.map(stringOf).map((keyword) => keyword.trim()).filter(Boolean).slice(0, 3);
 };
 
+export type LiveFallbackOptions = {
+  keywords?: string[];
+  signal?: AbortSignal;
+  skipPageIds?: ReadonlySet<string>;
+};
+
 export const liveFallback = async (
   env: Env,
   question: string,
   deadline: RequestDeadline,
-  signal?: AbortSignal,
-  skipPageIds: ReadonlySet<string> = new Set(),
+  options: LiveFallbackOptions = {},
 ): Promise<Context[]> => {
-  if (!env.NOTION_TOKEN || stopped(signal) || deadline.remaining() < LIVE_FALLBACK_MIN_REMAINING_MS) return [];
-  const client = new NotionClient(env.NOTION_TOKEN);
-  let keywords: string[];
-  try {
-    keywords = await keywordsFor(env, question, deadline, signal);
-  } catch {
-    return [];
+  const { keywords: precomputedKeywords, signal, skipPageIds = new Set<string>() } = options;
+  if (!env.NOTION_TOKEN || stopped(signal)) return [];
+  const client = new NotionClient(env.NOTION_TOKEN, NOTION_BUDGET_LIVE);
+  let keywords = precomputedKeywords;
+  if (keywords === undefined) {
+    try {
+      keywords = await keywordsFor(env, question, deadline, signal);
+    } catch {
+      return [];
+    }
   }
   if (!keywords.length || stopped(signal)) return [];
 
@@ -631,7 +676,7 @@ export const relatedPages = async (
   );
   const tags = String(contexts[0].metadata.tags ?? "").split(",").map((tag) => tag.trim()).filter(Boolean);
   if (!tags.length || deadline.remaining() <= 0) return "";
-  const client = new NotionClient(env.NOTION_TOKEN);
+  const client = new NotionClient(env.NOTION_TOKEN, NOTION_BUDGET_RELATED);
   const cachedCounts = await readCachedTagCounts(env);
   let selected = tags[0];
   if (cachedCounts) {

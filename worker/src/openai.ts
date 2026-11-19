@@ -3,6 +3,7 @@
 // knowledge base lacks an answer it may well have.
 
 import {
+  ANSWER_MAX_TOKENS,
   EMBED_DIMENSIONS,
   EMBED_MODEL,
   EMBED_TIMEOUT_MS,
@@ -63,6 +64,35 @@ export type AnswerJson = {
   answer: string;
 };
 
+const stripJsonFence = (raw: string): string =>
+  raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+
+const NOT_FOUND_PHRASES = [
+  "見つかりませんでした",
+  "見当たりません",
+  "記載がありません",
+  "記録がありません",
+  "含まれていません",
+  "情報がありません",
+] as const;
+
+const withoutWhitespace = (text: string): string => text.replace(/\s/g, "");
+
+const isNormalizedNotFound = (text: string): boolean => {
+  const normalized = withoutWhitespace(text);
+  const normalizedMessage = withoutWhitespace(NOT_FOUND_MESSAGE);
+  if (!normalized || normalized === normalizedMessage) return true;
+
+  const containsPhrase = NOT_FOUND_PHRASES.some((phrase) => normalized.includes(phrase));
+  if (!containsPhrase) return false;
+  if (normalized.length <= 120) return true;
+
+  const firstSentence = withoutWhitespace(text.split(/[。\n]/, 1)[0] ?? "");
+  return NOT_FOUND_PHRASES.some((phrase) => firstSentence.includes(phrase));
+};
+
+const looksLikeJson = (text: string): boolean => /^(?:[\[{\"]|true\b|false\b|null\b|-?\d)/.test(text);
+
 export const chat = async (
   system: string,
   user: string,
@@ -98,20 +128,8 @@ export const chatJson = async (
   signal?: AbortSignal,
 ): Promise<unknown> => {
   const raw = await chat(system, user, apiKey, timeoutMs, { json: true, maxTokens: 128 }, signal);
-  const withoutFence = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const withoutFence = stripJsonFence(raw);
   return JSON.parse(withoutFence);
-};
-
-const stripJsonFence = (raw: string): string =>
-  raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-
-const isNormalizedNotFound = (text: string): boolean => {
-  const normalized = text.replace(/\s/g, "");
-  const normalizedMessage = NOT_FOUND_MESSAGE.replace(/\s/g, "");
-  return normalized === normalizedMessage || (
-    normalized.includes("見つかりませんでした") &&
-    (normalized.includes("Notion") || normalized.includes("資料"))
-  );
 };
 
 export const answerJson = async (
@@ -121,22 +139,26 @@ export const answerJson = async (
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<AnswerJson> => {
-  const raw = await chat(system, user, apiKey, timeoutMs, { json: true, maxTokens: GEN_MAX_TOKENS }, signal);
+  const raw = await chat(system, user, apiKey, timeoutMs, { json: true, maxTokens: ANSWER_MAX_TOKENS }, signal);
   const withoutFence = stripJsonFence(raw);
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(withoutFence);
-    if (parsed !== null && typeof parsed === "object") {
-      const record = parsed as Record<string, unknown>;
-      if (record.found === false) return { found: false, answer: "" };
-      if (record.found === true) {
-        const answer = typeof record.answer === "string" ? record.answer.trim() : "";
-        return answer ? { found: true, answer } : { found: false, answer: "" };
-      }
-    }
+    parsed = JSON.parse(withoutFence);
   } catch {
-    // Treat a non-JSON response as a plain-text answer below.
+    // A truncated object/array must never be posted as a text answer.
+    if (looksLikeJson(withoutFence)) return { found: false, answer: "" };
+    return isNormalizedNotFound(withoutFence)
+      ? { found: false, answer: "" }
+      : { found: Boolean(withoutFence), answer: withoutFence };
   }
 
-  if (isNormalizedNotFound(raw)) return { found: false, answer: "" };
-  return { found: Boolean(raw), answer: raw };
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { found: false, answer: "" };
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const found = record.found === true || record.found === "true";
+  const answer = typeof record.answer === "string" ? record.answer.trim() : "";
+  if (!found || !answer || isNormalizedNotFound(answer)) return { found: false, answer: "" };
+  return { found: true, answer };
 };

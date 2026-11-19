@@ -7,6 +7,7 @@ export const EMBED_DIMENSIONS = 512;
 export const GEN_MODEL = "gpt-4.1-mini";
 export const GEN_TEMPERATURE = 0.2;
 export const GEN_MAX_TOKENS = 1024;
+export const ANSWER_MAX_TOKENS = 2048;
 
 export const TOP_K = 5;
 // Vectorize returns a cosine *similarity* (higher = closer), unlike Chroma's distance.
@@ -22,7 +23,7 @@ export const GEN_TIMEOUT_MS = 18_000;
 // The response is acknowledged before this work starts, but waitUntil is still
 // bounded. Keep a small reserve for the final Slack request.
 export const REQUEST_DEADLINE_MS = 27_000;
-export const LIVE_FALLBACK_MIN_REMAINING_MS = 12_000;
+export const LIVE_FALLBACK_MIN_REMAINING_MS = 9_000;
 export const LIVE_KEYWORD_TIMEOUT_MS = 4_000;
 export const LIVE_SECOND_CHAT_MIN_MS = 5_000;
 export const RELATED_TIMEOUT_MS = 4_000;

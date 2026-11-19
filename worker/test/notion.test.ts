@@ -244,3 +244,25 @@ test("commands and live fallback are graceful without a Notion token or time", a
   expect(await liveFallback(env, "質問", createDeadline(27_000))).toEqual([]);
   expect(await liveFallback(envWith(), "質問", createDeadline(1))).toEqual([]);
 });
+
+test("NotionClient stops issuing requests once its budget is used", async () => {
+  const { NotionClient } = await import("../src/notion");
+  const { createDeadline } = await import("../src/retriever");
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  try {
+    const client = new NotionClient("dummy-token", 2);
+    const deadline = createDeadline(20_000);
+    expect(await client.request("/search", deadline)).not.toBeNull();
+    expect(await client.request("/search", deadline)).not.toBeNull();
+    expect(await client.request("/search", deadline)).toBeNull();
+    expect(calls).toBe(2);
+    expect(client.requestCount).toBe(2);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

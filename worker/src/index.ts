@@ -16,10 +16,9 @@ import {
   NOT_FOUND_MESSAGE,
   REQUEST_DEADLINE_MS,
   RELATED_TIMEOUT_MS,
-  SLACK_RESPONSE_RESERVE_MS,
 } from "./config";
 import { answerJson } from "./openai";
-import { handleCommand, liveFallback, normalizeNotionId, relatedPages } from "./notion";
+import { handleCommand, keywordsFor, liveFallback, normalizeNotionId, relatedPages } from "./notion";
 import { buildPrompt, buildSources, SYSTEM_PROMPT } from "./prompt";
 import { createDeadline, search, usableRemaining, type RequestDeadline } from "./retriever";
 import { isAllowedChannel, isAllowedUser, postMessage, stripMentions, verifySlackSignature } from "./slack";
@@ -55,14 +54,6 @@ const pageIdsOf = (contexts: Context[]): Set<string> => new Set(
     .map(normalizeNotionId),
 );
 
-const withoutIndexedPages = (
-  contexts: Context[],
-  indexedPageIds: Set<string>,
-): Context[] => contexts.filter((context) => {
-  const pageId = String(context.metadata.page_id ?? "");
-  return !pageId || !indexedPageIds.has(normalizeNotionId(pageId));
-});
-
 export const answer = async (
   env: Env,
   question: string,
@@ -83,33 +74,43 @@ export const answer = async (
   if (timeout <= 0) throw new Error("request deadline exceeded before answer");
 
   const indexedPageIds = pageIdsOf(contexts);
-  const liveController = env.NOTION_TOKEN ? new AbortController() : null;
-  const liveRemaining = Math.max(
-    0,
-    deadline.remaining() - SLACK_RESPONSE_RESERVE_MS - LIVE_SECOND_CHAT_MIN_MS,
-  );
-  const liveDeadline = createDeadline(liveRemaining);
-  const livePromise = liveController
-    ? liveFallback(env, question, liveDeadline, liveController.signal, indexedPageIds).catch(() => [])
+  const keywordController = env.NOTION_TOKEN ? new AbortController() : null;
+  const keywordsPromise = keywordController
+    ? keywordsFor(env, question, deadline, keywordController.signal).catch(() => [])
     : null;
-  const relatedDeadline = createDeadline(Math.min(RELATED_TIMEOUT_MS, Math.max(0, deadline.remaining() - SLACK_RESPONSE_RESERVE_MS)));
+  // NotionClient.request subtracts SLACK_RESPONSE_RESERVE_MS from this deadline.
+  const relatedDeadline = createDeadline(Math.min(RELATED_TIMEOUT_MS, Math.max(0, deadline.remaining())));
   const relatedPromise = relatedPages(env, contexts, relatedDeadline).catch(() => "");
   let result: Awaited<ReturnType<typeof answerJson>>;
   try {
     result = await answerJson(SYSTEM_PROMPT, buildPrompt(question, contexts), env.OPENAI_API_KEY, timeout);
   } catch (error) {
-    liveController?.abort();
-    void livePromise;
+    keywordController?.abort();
+    void keywordsPromise;
     void relatedPromise;
     throw error;
   }
 
   if (result.found === false) {
+    if (deadline.remaining() < LIVE_FALLBACK_MIN_REMAINING_MS) {
+      keywordController?.abort();
+      void keywordsPromise;
+      void relatedPromise;
+      return notFound();
+    }
+    const keywords = keywordsPromise ? await keywordsPromise : [];
+    const liveRemaining = Math.max(0, deadline.remaining() - LIVE_SECOND_CHAT_MIN_MS);
+    // The reduced deadline reserves time for the second chat; the Notion client
+    // is the single place that subtracts SLACK_RESPONSE_RESERVE_MS.
+    const liveDeadline = createDeadline(liveRemaining);
+    const liveContexts = keywords.length
+      ? await liveFallback(env, question, liveDeadline, { keywords, skipPageIds: indexedPageIds }).catch(() => [])
+      : [];
     void relatedPromise;
-    const liveContexts = livePromise ? withoutIndexedPages(await livePromise, indexedPageIds) : [];
-    if (liveContexts.length === 0 || usableRemaining(deadline) < LIVE_SECOND_CHAT_MIN_MS) return notFound();
-    const secondTimeout = Math.min(GEN_TIMEOUT_MS, usableRemaining(deadline));
-    if (secondTimeout < LIVE_SECOND_CHAT_MIN_MS) return notFound();
+    if (liveContexts.length === 0) return notFound();
+    const secondRemaining = usableRemaining(deadline);
+    if (secondRemaining < LIVE_SECOND_CHAT_MIN_MS) return notFound();
+    const secondTimeout = Math.min(GEN_TIMEOUT_MS, secondRemaining);
     try {
       const liveResult = await answerJson(
         SYSTEM_PROMPT,
@@ -124,9 +125,9 @@ export const answer = async (
     }
   }
 
-  // No sources on a "not found" reply. A real index answer wins over live retrieval.
-  liveController?.abort();
-  void livePromise;
+  // A real index answer wins over live retrieval.
+  keywordController?.abort();
+  void keywordsPromise;
   const related = await relatedPromise;
   const suffix = [buildSources(contexts), related ? `\n${related}` : ""].join("");
   return answered(result.answer + suffix, true, "index");
