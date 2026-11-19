@@ -24,6 +24,7 @@ export const GEN_TIMEOUT_MS = 18_000;
 export const REQUEST_DEADLINE_MS = 27_000;
 export const LIVE_FALLBACK_MIN_REMAINING_MS = 12_000;
 export const LIVE_KEYWORD_TIMEOUT_MS = 4_000;
+export const LIVE_SECOND_CHAT_MIN_MS = 5_000;
 export const RELATED_TIMEOUT_MS = 4_000;
 export const SLACK_RESPONSE_RESERVE_MS = 1_500;
 export const NOTION_CACHE_TTL_SEC = 24 * 60 * 60;

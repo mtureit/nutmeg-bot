@@ -22,7 +22,7 @@ const makeKV = () => {
 let posts: any[] = [];
 let lookups: string[] = [];
 let userFlags: Record<string, boolean> = {};
-let chatReply = "締切は 2026-11-01 です。";
+let chatReply = '{"found":true,"answer":"締切は 2026-11-01 です。"}';
 let openaiFails = false;
 let matches: any[] = [];
 
@@ -92,7 +92,7 @@ beforeEach(() => {
   posts = [];
   lookups = [];
   userFlags = {};
-  chatReply = "締切は 2026-11-01 です。";
+  chatReply = '{"found":true,"answer":"締切は 2026-11-01 です。"}';
   openaiFails = false;
   matches = [hit(0.8)];
 });
@@ -132,7 +132,7 @@ test("below threshold says not found without calling the chat model", async () =
 });
 
 test("model's own not-found reply carries no sources", async () => {
-  chatReply = NOT_FOUND_MESSAGE;
+  chatReply = '{"found":false,"answer":""}';
   await send(mention());
   expect(posts[0].text).toBe(NOT_FOUND_MESSAGE);
 });

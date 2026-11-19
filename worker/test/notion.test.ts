@@ -88,14 +88,61 @@ test("matches tag names exactly, by a unique partial, or reports ambiguity", asy
 
 test("lists tag counts from the cache and excludes article ids", async () => {
   const env = envWith("notion-test-token", {
-    "cache:tagcounts": [
-      { id: "tag-infra", name: "インフラ", count: 228 },
-      { id: "tag-docs", name: "文書", count: 5 },
+    "cache:tagcounts:v2": [
+      { ids: ["tag-infra"], name: "インフラ", count: 228 },
+      { ids: ["tag-docs"], name: "文書", count: 5 },
     ],
   });
   const answer = await handleCommand(env, "タグ一覧", createDeadline(2_000));
   expect(answer).toContain("インフラ (228)");
   expect(answer).toContain("文書 (5)");
+});
+
+test("groups duplicate tag names, deduplicates counts, and queries all ids", async () => {
+  const articleRequests: any[] = [];
+  globalThis.fetch = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const text = String(url);
+    if (text.includes(NOTION_TAG_LIBRARY_DATA_SOURCE_ID)) {
+      return Response.json({ results: [
+        tagPage("tag-work-1", " 作業ログ "),
+        tagPage("tag-work-2", "作業ログ"),
+        tagPage("tag-single", "単独"),
+      ], has_more: false });
+    }
+    if (text.includes(NOTION_ARTICLES_DATA_SOURCE_ID)) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      articleRequests.push(body);
+      if (body.filter?.or) {
+        return Response.json({ results: [articlePage("article-work", "作業記録", "2026-11-18", ["tag-work-2"])], has_more: false });
+      }
+      if (body.filter?.property) {
+        return Response.json({ results: [articlePage("article-single", "単独記事", "2026-11-17", ["tag-single"])], has_more: false });
+      }
+      return Response.json({ results: [
+        articlePage("article-both", "両方付き", "2026-11-18", ["tag-work-1", "tag-work-2"]),
+        articlePage("article-single", "単独記事", "2026-11-17", ["tag-single"]),
+      ], has_more: false });
+    }
+    throw new Error(`unexpected URL ${text}`);
+  };
+  const env = envWith();
+
+  const list = await handleCommand(env, "タグ一覧", createDeadline(2_000));
+  expect(list).toContain("作業ログ (1)");
+  expect(list).not.toContain("作業ログ (2)");
+
+  const grouped = await handleCommand(env, "タグ 作業ログ", createDeadline(2_000));
+  expect(grouped).toContain("作業記録");
+  const orFilter = articleRequests.find((body) => body.filter?.or)?.filter.or;
+  expect(orFilter).toEqual([
+    { property: "Tag", relation: { contains: "tag-work-1" } },
+    { property: "Tag", relation: { contains: "tag-work-2" } },
+  ]);
+
+  const single = await handleCommand(env, "タグ 単独", createDeadline(2_000));
+  expect(single).toContain("単独記事");
+  const singleRequest = articleRequests.find((body) => body.filter?.property && body.filter.property === "Tag");
+  expect(singleRequest.filter.relation.contains).toBe("tag-single");
 });
 
 test("converts supported blocks, truncates, and redacts live content", () => {
@@ -160,20 +207,23 @@ test("live fallback fetches shallow blocks, redacts them, and marks the source",
 
 test("related pages use the least-used cited tag and exclude cited pages", async () => {
   const env = envWith("notion-test-token", {
-    "cache:tagcounts": [
-      { id: "tag-infra", name: "インフラ", count: 228 },
-      { id: "tag-research", name: "研究", count: 2 },
+    "cache:tagcounts:v2": [
+      { ids: ["tag-infra"], name: "インフラ", count: 228 },
+      { ids: ["tag-research-1", "tag-research-2"], name: "研究", count: 2 },
     ],
-    "cache:taglib": [
-      { id: "tag-infra", name: "インフラ" },
-      { id: "tag-research", name: "研究" },
+    "cache:taglib:v2": [
+      { ids: ["tag-infra"], name: "インフラ" },
+      { ids: ["tag-research-1", "tag-research-2"], name: "研究" },
     ],
   });
   globalThis.fetch = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const text = String(url);
     if (text.includes(NOTION_ARTICLES_DATA_SOURCE_ID)) {
       const body = JSON.parse(String(init?.body ?? "{}"));
-      expect(body.filter.relation.contains).toBe("tag-research");
+      expect(body.filter.or).toEqual([
+        { property: "Tag", relation: { contains: "tag-research-1" } },
+        { property: "Tag", relation: { contains: "tag-research-2" } },
+      ]);
       return Response.json({ results: [articlePage("page-cited", "既出", "2026-11-18"), articlePage("page-related", "関連ページ", "2026-11-17")], has_more: false });
     }
     throw new Error(`unexpected URL ${text}`);

@@ -33,11 +33,27 @@ const excludedIds = new Set(EXCLUDED_NOTION_IDS.map(normalizeNotionId));
 
 export const isExcludedNotionId = (value: string): boolean => excludedIds.has(normalizeNotionId(value));
 
-export type Tag = { id: string; name: string };
+export type Tag = { name: string; ids: string[] };
 export type TagCount = Tag & { count: number };
 export type ArticleRow = { id: string; title: string; url: string; date: string; raw: JsonObject };
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promise((resolve) => {
+  if (signal?.aborted) {
+    resolve();
+    return;
+  }
+  const timeout = setTimeout(done, ms);
+  const abort = () => {
+    clearTimeout(timeout);
+    done();
+  };
+  const cleanup = () => signal?.removeEventListener("abort", abort);
+  function done(): void {
+    cleanup();
+    resolve();
+  }
+  signal?.addEventListener("abort", abort, { once: true });
+});
 
 export class NotionClient {
   private readonly token: string;
@@ -50,26 +66,32 @@ export class NotionClient {
     path: string,
     deadline: RequestDeadline,
     init: RequestInit = {},
+    signal?: AbortSignal,
     retried429 = false,
   ): Promise<JsonObject | null> {
+    if (signal?.aborted) return null;
     const remaining = Math.max(0, deadline.remaining() - SLACK_RESPONSE_RESERVE_MS);
     if (remaining <= 0) return null;
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${this.token}`);
     headers.set("Notion-Version", NOTION_VERSION);
     headers.set("Content-Type", "application/json");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1, remaining));
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
     try {
       const response = await fetch(`${NOTION_API}${path}`, {
         ...init,
         headers,
-        signal: AbortSignal.timeout(Math.max(1, remaining)),
+        signal: controller.signal,
       });
       if (response.status === 429 && !retried429) {
         const retryAfter = Number(response.headers.get("Retry-After"));
         const waitMs = Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter * 1000 : NaN;
         if (Number.isFinite(waitMs) && waitMs < Math.max(0, deadline.remaining() - SLACK_RESPONSE_RESERVE_MS)) {
-          await sleep(waitMs);
-          return this.request(path, deadline, init, true);
+          await sleep(waitMs, signal);
+          return this.request(path, deadline, init, signal, true);
         }
         return null;
       }
@@ -78,6 +100,9 @@ export class NotionClient {
       return objectOf(body);
     } catch {
       return null;
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
     }
   }
 }
@@ -180,10 +205,38 @@ const queryDataSource = async (
   return { rows, complete: false };
 };
 
-const tagFromPage = (page: JsonObject): Tag | null => {
+type TagRow = { id: string; name: string };
+
+const tagFromPage = (page: JsonObject): TagRow | null => {
   const id = stringOf(page.id);
   const name = pageTitle(page).trim();
   return id && name ? { id, name } : null;
+};
+
+const tagNameKey = (name: string): string => name.trim().toLowerCase();
+
+const groupTags = (rows: TagRow[]): Tag[] => {
+  const groups = new Map<string, Tag>();
+  for (const row of rows) {
+    const name = row.name.trim();
+    const key = tagNameKey(name);
+    if (!name || !key) continue;
+    const group = groups.get(key);
+    if (!group) {
+      groups.set(key, { name, ids: [row.id] });
+      continue;
+    }
+    if (!group.ids.some((id) => normalizeNotionId(id) === normalizeNotionId(row.id))) group.ids.push(row.id);
+  }
+  return [...groups.values()];
+};
+
+const cachedTagGroups = (value: unknown): Tag[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map(objectOf).map((item) => ({
+    name: stringOf(item.name).trim(),
+    ids: arrayOf(item.ids).map(stringOf).filter(Boolean),
+  })).filter((tag) => tag.name && tag.ids.length > 0);
 };
 
 export const getTagLibrary = async (
@@ -191,25 +244,22 @@ export const getTagLibrary = async (
   client: NotionClient,
   deadline: RequestDeadline,
 ): Promise<{ tags: Tag[]; complete: boolean }> => {
-  const cached = await cacheGet(env, "cache:taglib");
-  if (Array.isArray(cached)) {
-    const tags = cached.map(objectOf).map((item) => ({ id: stringOf(item.id), name: stringOf(item.name) })).filter((tag) => tag.id && tag.name);
-    return { tags, complete: true };
-  }
+  const cachedValue = await cacheGet(env, "cache:taglib:v2");
+  if (Array.isArray(cachedValue)) return { tags: cachedTagGroups(cachedValue), complete: true };
   const result = await queryDataSource(client, NOTION_TAG_LIBRARY_DATA_SOURCE_ID, deadline);
-  const tags = result.rows.map(tagFromPage).filter((tag): tag is Tag => tag !== null);
-  if (result.complete) await cachePut(env, "cache:taglib", tags);
+  const tags = groupTags(result.rows.map(tagFromPage).filter((tag): tag is TagRow => tag !== null));
+  if (result.complete) await cachePut(env, "cache:taglib:v2", tags);
   return { tags, complete: result.complete };
 };
 
 const readCachedTagCounts = async (env: Env): Promise<TagCount[] | null> => {
-  const cached = await cacheGet(env, "cache:tagcounts");
+  const cached = await cacheGet(env, "cache:tagcounts:v2");
   if (!Array.isArray(cached)) return null;
   const counts = cached.map(objectOf).map((item) => ({
-    id: stringOf(item.id),
-    name: stringOf(item.name),
+    name: stringOf(item.name).trim(),
+    ids: arrayOf(item.ids).map(stringOf).filter(Boolean),
     count: Number(item.count),
-  })).filter((tag) => tag.id && tag.name && Number.isFinite(tag.count));
+  })).filter((tag) => tag.name && tag.ids.length > 0 && Number.isFinite(tag.count));
   return counts;
 };
 
@@ -227,13 +277,15 @@ export const getTagCounts = async (
   ]);
   if (!library.complete || !articles.complete) return { tags: library.tags.map((tag) => ({ ...tag, count: 0 })), complete: false };
 
-  const countById = new Map<string, number>();
-  for (const article of articles.rows) {
-    if (isExcludedNotionId(stringOf(article.id))) continue;
-    for (const id of relationIds(article)) countById.set(normalizeNotionId(id), (countById.get(normalizeNotionId(id)) ?? 0) + 1);
-  }
-  const tags = library.tags.map((tag) => ({ ...tag, count: countById.get(normalizeNotionId(tag.id)) ?? 0 }));
-  await cachePut(env, "cache:tagcounts", tags);
+  const tags = library.tags.map((tag) => {
+    const ids = new Set(tag.ids.map(normalizeNotionId));
+    const count = articles.rows.filter((article) => {
+      if (isExcludedNotionId(stringOf(article.id))) return false;
+      return relationIds(article).some((id) => ids.has(normalizeNotionId(id)));
+    }).length;
+    return { ...tag, count };
+  });
+  await cachePut(env, "cache:tagcounts:v2", tags);
   return { tags, complete: true };
 };
 
@@ -246,10 +298,12 @@ export const queryArticles = async (
   env: Env,
   client: NotionClient,
   deadline: RequestDeadline,
-  tagId?: string,
+  tag?: Tag | string,
 ): Promise<{ rows: ArticleRow[]; complete: boolean }> => {
   const body: JsonObject = { sorts: articleSorts };
-  if (tagId) body.filter = { property: "Tag", relation: { contains: tagId } };
+  const ids = typeof tag === "string" ? [tag] : tag?.ids ?? [];
+  if (ids.length === 1) body.filter = { property: "Tag", relation: { contains: ids[0] } };
+  if (ids.length > 1) body.filter = { or: ids.map((id) => ({ property: "Tag", relation: { contains: id } })) };
   const result = await queryDataSource(client, NOTION_ARTICLES_DATA_SOURCE_ID, deadline, body, 10);
   return {
     rows: result.rows.filter((row) => !isExcludedNotionId(stringOf(row.id))).map(articleFromPage),
@@ -291,11 +345,11 @@ const formatArticle = (article: ArticleRow): string => {
 };
 
 const findTag = (tags: Tag[], name: string): { tag?: Tag; candidates: Tag[] } => {
-  const normalized = name.trim().toLowerCase();
-  const exact = tags.filter((tag) => tag.name.toLowerCase() === normalized);
+  const normalized = tagNameKey(name);
+  const exact = tags.filter((tag) => tagNameKey(tag.name) === normalized);
   if (exact.length === 1) return { tag: exact[0], candidates: [] };
   if (exact.length > 1) return { candidates: exact };
-  const partial = tags.filter((tag) => tag.name.toLowerCase().includes(normalized));
+  const partial = tags.filter((tag) => tagNameKey(tag.name).includes(normalized));
   return partial.length === 1 ? { tag: partial[0], candidates: [] } : { candidates: partial };
 };
 
@@ -335,7 +389,7 @@ export const handleCommand = async (
       ? `タグ名が一意に決まりません。${formatCandidates(match.candidates)}`
       : `タグ「${command.name}」は見つかりません。タグ一覧を確認してください。`;
   }
-  const result = await queryArticles(env, client, deadline, match.tag.id);
+  const result = await queryArticles(env, client, deadline, match.tag);
   return `タグ: ${match.tag.name}\n${result.rows.map(formatArticle).join("\n") || "（記事が見つかりません）"}`;
 };
 
@@ -360,6 +414,7 @@ const retrieveParent = async (
   ref: Exclude<NonNullable<ParentRef>, { type: "workspace" }>,
   deadline: RequestDeadline,
   cache: Map<string, Promise<JsonObject | null>>,
+  signal?: AbortSignal,
 ): Promise<JsonObject | null> => {
   const key = `${ref.type}:${normalizeNotionId(ref.id)}`;
   const existing = cache.get(key);
@@ -371,25 +426,30 @@ const retrieveParent = async (
       : ref.type === "database"
         ? `/databases/${encodeURIComponent(ref.id)}`
         : `/data_sources/${encodeURIComponent(ref.id)}`;
-  const request = client.request(path, deadline);
+  const request = client.request(path, deadline, {}, signal);
   cache.set(key, request);
   return request;
 };
+
+const stopped = (signal?: AbortSignal): boolean => signal?.aborted === true;
 
 const allowedLivePage = async (
   page: JsonObject,
   client: NotionClient,
   deadline: RequestDeadline,
   cache: Map<string, Promise<JsonObject | null>>,
+  signal?: AbortSignal,
 ): Promise<boolean> => {
+  if (stopped(signal)) return false;
   if (isExcludedNotionId(stringOf(page.id)) || liveTitleExcluded(pageTitle(page))) return false;
   let current = page;
   for (let level = 0; level < 3; level++) {
+    if (stopped(signal)) return false;
     const ref = parentRef(parentOf(current));
     if (!ref || ref.type === "workspace") return true;
     if (!ref.id) return false;
     if (isExcludedNotionId(ref.id)) return false;
-    const ancestor = await retrieveParent(client, ref, deadline, cache);
+    const ancestor = await retrieveParent(client, ref, deadline, cache, signal);
     if (!ancestor) return false;
     current = ancestor;
   }
@@ -437,20 +497,21 @@ const fetchBlocks = async (
   blockId: string,
   depth: number,
   deadline: RequestDeadline,
+  signal?: AbortSignal,
 ): Promise<JsonObject[] | null> => {
   const blocks: JsonObject[] = [];
   let cursor: string | undefined;
   while (blocks.length < 100) {
-    if (deadline.remaining() <= 0) return null;
+    if (deadline.remaining() <= 0 || stopped(signal)) return null;
     const query = cursor ? `?page_size=100&start_cursor=${encodeURIComponent(cursor)}` : "?page_size=100";
-    const response = await client.request(`/blocks/${encodeURIComponent(blockId)}/children${query}`, deadline);
+    const response = await client.request(`/blocks/${encodeURIComponent(blockId)}/children${query}`, deadline, {}, signal);
     if (!response) return null;
     const page = arrayOf(response.results).map(objectOf);
     for (const block of page) {
       if (blocks.length >= 100) break;
       blocks.push(block);
       if (depth < 2 && block.has_children === true) {
-        const children = await fetchBlocks(client, stringOf(block.id), depth + 1, deadline);
+        const children = await fetchBlocks(client, stringOf(block.id), depth + 1, deadline, signal);
         if (!children) return null;
         block.children = children;
       }
@@ -465,8 +526,9 @@ const pageMarkdown = async (
   client: NotionClient,
   page: JsonObject,
   deadline: RequestDeadline,
+  signal?: AbortSignal,
 ): Promise<string | null> => {
-  const blocks = await fetchBlocks(client, stringOf(page.id), 0, deadline);
+  const blocks = await fetchBlocks(client, stringOf(page.id), 0, deadline, signal);
   if (!blocks) return null;
   const title = redact(pageTitle(page)).text;
   const body = blocksToMarkdown(blocks, LIVE_PAGE_MAX_CHARS);
@@ -474,7 +536,13 @@ const pageMarkdown = async (
   return [`# ${title}`.trim(), redacted].filter(Boolean).join("\n\n").slice(0, LIVE_PAGE_MAX_CHARS);
 };
 
-const keywordsFor = async (env: Env, question: string, deadline: RequestDeadline): Promise<string[]> => {
+const keywordsFor = async (
+  env: Env,
+  question: string,
+  deadline: RequestDeadline,
+  signal?: AbortSignal,
+): Promise<string[]> => {
+  if (stopped(signal)) return [];
   const timeout = Math.min(LIVE_KEYWORD_TIMEOUT_MS, Math.max(0, deadline.remaining() - SLACK_RESPONSE_RESERVE_MS));
   if (timeout <= 0) return [];
   const result = await chatJson(
@@ -482,7 +550,9 @@ const keywordsFor = async (env: Env, question: string, deadline: RequestDeadline
     question,
     env.OPENAI_API_KEY,
     timeout,
+    signal,
   );
+  if (stopped(signal)) return [];
   const raw = Array.isArray(result) ? result : arrayOf(objectOf(result).keywords);
   return raw.map(stringOf).map((keyword) => keyword.trim()).filter(Boolean).slice(0, 3);
 };
@@ -491,41 +561,45 @@ export const liveFallback = async (
   env: Env,
   question: string,
   deadline: RequestDeadline,
+  signal?: AbortSignal,
+  skipPageIds: ReadonlySet<string> = new Set(),
 ): Promise<Context[]> => {
-  if (!env.NOTION_TOKEN || deadline.remaining() < LIVE_FALLBACK_MIN_REMAINING_MS) return [];
+  if (!env.NOTION_TOKEN || stopped(signal) || deadline.remaining() < LIVE_FALLBACK_MIN_REMAINING_MS) return [];
   const client = new NotionClient(env.NOTION_TOKEN);
   let keywords: string[];
   try {
-    keywords = await keywordsFor(env, question, deadline);
+    keywords = await keywordsFor(env, question, deadline, signal);
   } catch {
     return [];
   }
-  if (!keywords.length) return [];
+  if (!keywords.length || stopped(signal)) return [];
 
   const pages = new Map<string, JsonObject>();
   for (const keyword of keywords) {
-    if (deadline.remaining() <= 0) break;
+    if (deadline.remaining() <= 0 || stopped(signal)) break;
     const response = await client.request("/search", deadline, {
       method: "POST",
       body: JSON.stringify({ query: keyword, filter: { property: "object", value: "page" }, page_size: 5 }),
-    });
+    }, signal);
+    if (stopped(signal)) break;
     for (const page of arrayOf(response?.results).map(objectOf)) {
       const id = stringOf(page.id);
-      if (id && !pages.has(id)) pages.set(id, page);
+      // Pages already given to the index answer add nothing; skip them before picking the top 2.
+      if (id && !pages.has(id) && !skipPageIds.has(normalizeNotionId(id))) pages.set(id, page);
     }
   }
 
   const ancestorCache = new Map<string, Promise<JsonObject | null>>();
   const allowed: JsonObject[] = [];
   for (const page of pages.values()) {
-    if (deadline.remaining() <= 0 || allowed.length >= 2) break;
-    if (await allowedLivePage(page, client, deadline, ancestorCache)) allowed.push(page);
+    if (deadline.remaining() <= 0 || stopped(signal) || allowed.length >= 2) break;
+    if (await allowedLivePage(page, client, deadline, ancestorCache, signal)) allowed.push(page);
   }
 
   const contexts: Context[] = [];
   for (const page of allowed) {
-    if (deadline.remaining() <= 0) break;
-    const text = await pageMarkdown(client, page, deadline);
+    if (deadline.remaining() <= 0 || stopped(signal)) break;
+    const text = await pageMarkdown(client, page, deadline, signal);
     if (text === null) continue;
     const safeTitle = redact(pageTitle(page)).text;
     contexts.push({
@@ -533,6 +607,7 @@ export const liveFallback = async (
       metadata: {
         title: safeTitle,
         url: stringOf(page.url),
+        page_id: stringOf(page.id),
         source: "live",
         tags: "",
       },
@@ -561,15 +636,15 @@ export const relatedPages = async (
   let selected = tags[0];
   if (cachedCounts) {
     selected = tags.slice().sort((a, b) => {
-      const countA = cachedCounts.find((tag) => tag.name.toLowerCase() === a.toLowerCase())?.count ?? Number.POSITIVE_INFINITY;
-      const countB = cachedCounts.find((tag) => tag.name.toLowerCase() === b.toLowerCase())?.count ?? Number.POSITIVE_INFINITY;
+      const countA = cachedCounts.find((tag) => tagNameKey(tag.name) === tagNameKey(a))?.count ?? Number.POSITIVE_INFINITY;
+      const countB = cachedCounts.find((tag) => tagNameKey(tag.name) === tagNameKey(b))?.count ?? Number.POSITIVE_INFINITY;
       return countA - countB;
     })[0] ?? selected;
   }
   const library = await getTagLibrary(env, client, deadline);
   const tag = findTag(library.tags, selected).tag;
   if (!tag) return "";
-  const result = await queryArticles(env, client, deadline, tag.id);
+  const result = await queryArticles(env, client, deadline, tag);
   if (!result.complete) return "";
   const rows = result.rows.filter((row) => !sourceIds.has(normalizeNotionId(row.id))).slice(0, 3);
   if (!rows.length) return "";
